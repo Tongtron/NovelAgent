@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Novel Agent 个人自主小说作者控制台">
+  <title>Novel Agent · 自主作者控制台</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">N</div>
+        <div><strong>Novel Agent</strong><span>自主作者控制台</span></div>
+      </div>
+      <nav aria-label="主导航">
+        <button class="nav-item active" data-view="dashboard"><span>◫</span>创作控制台</button>
+        <button class="nav-item" data-view="create"><span>＋</span>创建小说</button>
+        <button class="nav-item" data-view="reader"><span>▤</span>作品阅读</button>
+        <button class="nav-item" data-view="memory"><span>◇</span>长期记忆</button>
+        <button class="nav-item" data-view="settings"><span>⚙</span>系统设置</button>
+      </nav>
+      <div class="sidebar-foot">
+        <div class="status-dot"></div>
+        <div><b id="runtimeMode">正在连接</b><span id="apiHint">检查本地服务</span></div>
+      </div>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">PERSONAL SERIAL FICTION STUDIO</p>
+          <h1 id="pageTitle">创作控制台</h1>
+        </div>
+        <div class="top-actions">
+          <select id="projectSelect" aria-label="选择小说项目"><option value="">尚无项目</option></select>
+          <button id="refreshButton" class="icon-button" title="刷新">↻</button>
+        </div>
+      </header>
+
+      <section id="flash" class="flash hidden" role="status"></section>
+
+      <section id="dashboardView" class="view active">
+        <div class="hero-card">
+          <div>
+            <span class="pill" id="projectStatus">等待创建</span>
+            <h2 id="projectTitle">让一个想法，变成持续生长的故事</h2>
+            <p id="projectSynopsis">选择标签并补充一句创意，系统会建立故事骨架，随后按章节规划、写作、审核和储备。</p>
+          </div>
+          <div class="hero-actions">
+            <button id="confirmButton" class="button secondary hidden">确认创作方案</button>
+            <button id="editBriefButton" class="button ghost hidden">修改方案</button>
+            <button id="regenerateBriefButton" class="button ghost hidden">重新生成</button>
+            <button id="recoverButton" class="button secondary hidden">修复并恢复</button>
+            <button id="generateButton" class="button primary" disabled>生成下一章</button>
+            <button id="pauseButton" class="button ghost hidden">暂停</button>
+            <button id="deleteDraftButton" class="button danger hidden">删除草稿</button>
+          </div>
+        </div>
+
+        <article id="briefWorkbench" class="panel brief-workbench hidden">
+          <div class="panel-head"><div><p class="eyebrow">PLAN WORKBENCH</p><h3>方案修改与版本对比</h3></div><span class="badge">确认前可修改</span></div>
+          <div class="workbench-grid">
+            <form id="briefEditForm" class="brief-edit-form hidden">
+              <label>正式书名<input name="selected_title" maxlength="80" required></label>
+              <label>故事简介<textarea name="synopsis" rows="4" required></textarea></label>
+              <div class="field-row"><label>目标读者<input name="target_readers" required></label><label>主角姓名<input name="protagonist_name" maxlength="20" required></label></div>
+              <label>主角介绍<textarea name="protagonist_profile" rows="3"></textarea></label>
+              <label>主要冲突<textarea name="main_conflict" rows="2" required></textarea></label>
+              <label>核心卖点（每行一项）<textarea name="selling_points" rows="3"></textarea></label>
+              <label>世界规则（每行一项）<textarea name="world_rules" rows="4"></textarea></label>
+              <label>开篇三章（每行一章）<textarea name="opening_three_chapters" rows="3"></textarea></label>
+              <label>文风规则（每行一项）<textarea name="style_guide" rows="3"></textarea></label>
+              <div class="field-row"><label>预计章节数<input name="total_chapters" type="number" min="1" required></label><label>分卷数<input name="volume_count" type="number" min="1" required></label></div>
+              <label>更新计划<input name="update_plan" required></label>
+              <div class="form-actions"><button class="button primary" type="submit">保存为新版本</button><button id="cancelBriefEdit" class="button ghost" type="button">取消</button></div>
+            </form>
+            <div class="brief-regenerate-box">
+              <label>告诉智能体哪里不满意<textarea id="briefFeedback" rows="4" placeholder="例如：书名更简洁；主角不要重生；开篇冲突更快。"></textarea></label>
+              <fieldset><legend>只重做选中的模块；不选则整体优化</legend><div class="chips compact-chips" id="briefSections">
+                <label class="chip"><input type="checkbox" value="title"><span>书名</span></label>
+                <label class="chip"><input type="checkbox" value="story"><span>故事核心</span></label>
+                <label class="chip"><input type="checkbox" value="protagonist"><span>主角</span></label>
+                <label class="chip"><input type="checkbox" value="world"><span>世界规则</span></label>
+                <label class="chip"><input type="checkbox" value="opening"><span>开篇三章</span></label>
+                <label class="chip"><input type="checkbox" value="style"><span>文风</span></label>
+                <label class="chip"><input type="checkbox" value="serialization"><span>连载计划</span></label>
+              </div></fieldset>
+              <button id="feedbackRegenerateButton" class="button secondary" type="button">按意见生成新版本</button>
+              <p class="muted">每次修改都会保留旧版本。只有点击“确认创作方案”后才会锁定设定并开始写作。</p>
+            </div>
+          </div>
+          <div class="version-compare">
+            <div class="compare-controls"><label>左侧版本<select id="briefVersionLeft"></select></label><label>右侧版本<select id="briefVersionRight"></select></label><button id="restoreBriefVersion" class="button ghost" type="button">恢复左侧版本</button></div>
+            <div class="compare-grid"><div id="briefCompareLeft" class="brief-snapshot empty">暂无版本</div><div id="briefCompareRight" class="brief-snapshot empty">暂无版本</div></div>
+          </div>
+        </article>
+
+        <div class="metric-grid">
+          <article class="metric"><span>今日完成</span><strong id="todayCount">0</strong><small>章节</small></article>
+          <article class="metric"><span>READY 储备</span><strong id="reserveCount">0</strong><small id="reserveTarget">目标 0</small></article>
+          <article class="metric"><span>当前进度</span><strong id="chapterCount">0</strong><small>正式章节</small></article>
+          <article class="metric"><span>运行健康度</span><strong id="healthScore">--</strong><small>本地数据层</small></article>
+        </div>
+
+        <div class="two-column">
+          <article class="panel">
+            <div class="panel-head"><div><p class="eyebrow">PIPELINE</p><h3>章节生产流程</h3></div><span class="badge">可恢复</span></div>
+            <div id="pipeline" class="pipeline">
+              <div class="pipeline-empty">生成章节后，这里会显示每个工作流节点。</div>
+            </div>
+          </article>
+          <article class="panel">
+            <div class="panel-head"><div><p class="eyebrow">RESERVE</p><h3>章节储备</h3></div><button class="text-button" data-view-jump="reader">查看全部</button></div>
+            <div id="chapterQueue" class="chapter-list"><div class="empty">暂无章节</div></div>
+          </article>
+        </div>
+
+        <article class="panel plan-panel">
+          <div class="panel-head"><div><p class="eyebrow">CREATIVE BRIEF</p><h3>创作方案</h3></div></div>
+          <div id="briefContent" class="empty">创建小说后显示方案、卖点和世界规则。</div>
+        </article>
+      </section>
+
+      <section id="createView" class="view">
+        <form id="createForm" class="form-layout">
+          <article class="panel form-main">
+            <p class="eyebrow">NEW NOVEL</p>
+            <h2>用标签确定方向</h2>
+            <p class="muted">标签会转换成可执行规则，并在每章写作前后参与检查。</p>
+            <fieldset><legend>读者频道</legend><div class="channel-switch">
+              <label><input type="radio" name="audience_channel" value="男频" checked><span>男频</span><small>目标推进、升级反馈、世界探索</small></label>
+              <label><input type="radio" name="audience_channel" value="女频"><span>女频</span><small>人物成长、情感因果、关系变化</small></label>
+            </div></fieldset>
+            <label>主类型
+              <select id="genreSelect" name="genre" required></select>
+            </label>
+            <label>书名（可选）<input name="preferred_title" maxlength="80" placeholder="留空则由智能体生成多个候选书名"></label>
+            <fieldset><legend>阅读体验（可多选）</legend><div class="chips" data-check-group="experiences"></div></fieldset>
+            <fieldset><legend>核心元素（可多选）</legend><div class="chips" data-check-group="elements"></div></fieldset>
+            <fieldset><legend>主角设定（可多选）</legend><div class="chips" data-check-group="protagonist_tags"></div></fieldset>
+            <p id="tagCatalogNote" class="catalog-note"></p>
+            <label>你的核心想法
+              <textarea name="idea" required rows="5" placeholder="例如：主角是一名仓储管理员，没有无限空间，只能依靠职业经验和有限资源建立社区。"></textarea>
+            </label>
+          </article>
+          <aside class="panel form-side">
+            <p class="eyebrow">CONSTRAINTS</p>
+            <h3>约束与更新计划</h3>
+            <label>必须包含 <input name="must_have" placeholder="逗号分隔"></label>
+            <label>希望包含 <input name="nice_to_have" placeholder="逗号分隔"></label>
+            <label>明确不要 <input name="exclude" placeholder="如：过度血腥, 悲剧结局"></label>
+            <label>感情线
+              <select id="romanceSelect" name="romance"></select>
+            </label>
+            <div class="field-row"><label>单章目标字数<input name="chapter_target_chars" type="number" min="800" max="8000" value="2200"></label><label>每日章节<input name="daily_chapters" type="number" min="1" max="20" value="2"></label></div>
+            <label>储备安全线<input name="reserve_target" type="number" min="1" max="50" value="5"></label>
+            <label class="toggle"><input name="require_plan_confirmation" type="checkbox" checked><span>生成方案后由我确认一次</span></label>
+            <button class="button primary wide" type="submit">生成创作方案</button>
+          </aside>
+        </form>
+      </section>
+
+      <section id="readerView" class="view reader-layout">
+        <aside class="panel chapter-nav"><div class="panel-head"><h3>目录</h3><span id="readerTotal" class="badge">0 章</span></div><div id="readerChapterList" class="chapter-list"><div class="empty">暂无章节</div></div></aside>
+        <article class="panel reader-paper"><div id="readerContent" class="empty">选择一个 READY 章节开始阅读。</div></article>
+      </section>
+
+      <section id="memoryView" class="view">
+        <article class="panel character-library"><div class="panel-head"><div><h3>重要人物档案库</h3><p class="panel-subtitle">选择人物查看背景、目标、知识与关系</p></div><div class="panel-actions"><span id="characterCount" class="badge">0 人</span><button id="rebuildCharactersButton" class="text-button" type="button">重建重要人物档案</button></div></div><div id="characterBrowser" class="character-browser"><aside class="character-list-pane"><div id="characterList" class="character-list"><div class="empty">暂无人物</div></div></aside><section class="character-detail-pane"><button id="characterBackButton" class="text-button character-back-button" type="button">← 返回人物列表</button><div id="characterDetail"><div class="empty">请选择人物</div></div></section></div></article>
+        <div class="two-column memory-supporting">
+          <article class="panel"><div class="panel-head"><h3>世界硬规则</h3><span class="badge">锁定</span></div><div id="worldContent" class="empty">暂无规则</div></article>
+          <article class="panel"><div class="panel-head"><h3>时间线</h3><span class="badge">章节证据</span></div><div id="timelineContent" class="timeline"><div class="empty">暂无正式事件</div></div></article>
+        </div>
+        <article class="panel"><div class="panel-head"><h3>研究资料</h3><span id="semanticCount" class="badge">0 条语义索引</span></div><div id="researchContent"><div class="empty">尚未触发现实知识调研</div></div></article>
+      </section>
+
+      <section id="settingsView" class="view">
+        <div class="two-column">
+          <article class="panel"><p class="eyebrow">API READINESS</p><h2>外部能力状态</h2><p class="muted">密钥不会通过此页面展示。只有在 .env.local 明确配置并启用的能力才会联网。</p><div id="apiStatusCards" class="api-cards"></div></article>
+          <article class="panel"><p class="eyebrow">LOCAL DEFAULTS</p><h2>本地偏好</h2><form id="settingsForm"><label>默认每日章节数<input name="daily_chapters" type="number" min="1" max="20" value="2"></label><label>默认储备安全线<input name="reserve_target" type="number" min="1" max="50" value="5"></label><label>预算提醒额度<input name="budget_limit" type="number" min="0" step="1" value="0"></label><label class="toggle"><input name="debug_mode" type="checkbox"><span>显示调试信息</span></label><button class="button primary" type="submit">保存偏好</button></form></article>
+        </div>
+      </section>
+    </main>
+  </div>
+  <div id="busy" class="busy hidden"><div class="spinner"></div><strong>智能体正在工作</strong><span>规划、写作和审核可能需要一点时间</span></div>
+  <script src="/app.js"></script>
+</body>
+</html>
