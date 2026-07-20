@@ -13,7 +13,13 @@ from novel_agent.adapters_remote import (
     LLMResponseError,
 )
 from novel_agent.config import Settings
-from novel_agent.models import ChapterPlan, CreativeBrief, NovelCreateRequest
+from novel_agent.models import (
+    ChapterPlan,
+    ContinuityContext,
+    CreativeBrief,
+    NovelCreateRequest,
+    ReviewDecision,
+)
 from novel_agent.repository import SQLiteRepository
 from novel_agent.service import NovelAgentService
 from novel_agent.adapters import DisabledSearchAdapter
@@ -159,6 +165,24 @@ class DeepSeekGatewayTests(unittest.TestCase):
         self.assertIn("修订后的正文", revised)
         self.assertNotIn("response_format", transport.calls[0][2])
 
+    def test_deslop_uses_pinned_skill_as_a_bounded_language_edit(self) -> None:
+        transport = RecordingTransport([completion("第1章 清点\n\n林川把清单压在桌上。")])
+        gateway = self.gateway(transport)
+
+        polished = gateway.deslop_chapter(
+            "第1章 清点\n\n林川深吸一口气，终于明白这意味着什么。",
+            ChapterPlan.model_validate(plan_payload()),
+            "末世正文要落到资源和选择代价。",
+            "# story-deslop\n只改怎么说，不改发生了什么。",
+        )
+
+        self.assertIn("清单压在桌上", polished)
+        system = transport.calls[0][2]["messages"][0]["content"]
+        prompt = transport.calls[0][2]["messages"][1]["content"]
+        self.assertIn("approved_skill", system)
+        self.assertIn("不新增原文没有的事件", prompt)
+        self.assertNotIn("response_format", transport.calls[0][2])
+
     def test_character_extraction_only_keeps_important_people(self) -> None:
         transport = RecordingTransport(
             [completion(json.dumps({"characters": []}, ensure_ascii=False))]
@@ -176,6 +200,45 @@ class DeepSeekGatewayTests(unittest.TestCase):
         prompt = transport.calls[0][2]["messages"][1]["content"]
         self.assertIn("只提取需要长期建档的重要人物", prompt)
         self.assertIn("一次性具名路人", prompt)
+
+    def test_story_skills_continuity_review_uses_structured_output(self) -> None:
+        transport = RecordingTransport(
+            [
+                completion(
+                    json.dumps(
+                        {
+                            "decision": "PASS",
+                            "score": 96,
+                            "issues": [],
+                            "checks": {"timeline": 100},
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+            ]
+        )
+        gateway = self.gateway(transport)
+        context = ContinuityContext(
+            skill_name="revision-continuity",
+            skill_source="danjdewhurst/story-skills@test",
+            project_id="novel_test",
+            chapter_number=1,
+            creative_request=self.request().model_dump(mode="json"),
+            creative_brief=brief_payload(),
+            chapter_plan=plan_payload(),
+            current_draft="第1章 清点\n\n林川完成了清点。",
+        )
+
+        report = gateway.review_continuity(
+            context,
+            "## Continuity Audit Checklist\n- Character knowledge",
+        )
+
+        self.assertEqual(report.decision, ReviewDecision.PASS)
+        payload = transport.calls[0][2]
+        self.assertEqual(payload["response_format"], {"type": "json_object"})
+        self.assertIn("approved_skill", payload["messages"][0]["content"])
+        self.assertIn("deterministic_findings", payload["messages"][1]["content"])
 
     def test_empty_json_response_is_retried_once(self) -> None:
         transport = RecordingTransport(

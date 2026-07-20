@@ -62,7 +62,7 @@ class NovelAgentHandler(BaseHTTPRequestHandler):
                         "version": "0.1.0",
                         "mode": self.context.settings.mode,
                         "database": "ready",
-                        "apis": self.context.settings.api_readiness(),
+                        "apis": self._runtime_readiness(),
                     }
                 )
                 return
@@ -113,7 +113,7 @@ class NovelAgentHandler(BaseHTTPRequestHandler):
             if path == "/api/settings":
                 self._send_json(
                     {
-                        "runtime": self.context.settings.api_readiness(),
+                        "runtime": self._runtime_readiness(),
                         "preferences": self.context.repository.list_settings(),
                     }
                 )
@@ -242,6 +242,12 @@ class NovelAgentHandler(BaseHTTPRequestHandler):
         if length == 0:
             return {}
         return json.loads(self.rfile.read(length).decode("utf-8"))
+
+    def _runtime_readiness(self) -> dict[str, dict[str, object]]:
+        runtime = self.context.settings.api_readiness()
+        runtime["story_skills"] = self.context.service.story_skills.readiness()
+        runtime["oh_story"] = self.context.service.writing_skills.readiness()
+        return runtime
 
     def _send_json(self, payload: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(_jsonable(payload), ensure_ascii=False).encode("utf-8")

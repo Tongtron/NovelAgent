@@ -170,6 +170,7 @@ function renderBrief(brief, request) {
     <div class="brief-block"><h4>频道与题材</h4><p><b>${escapeHtml(request.audience_channel || "男频")}</b><br>${escapeHtml(request.genre)} · ${request.experiences.map(escapeHtml).join(" / ") || "自动确定体验"}</p></div>
     <div class="brief-block"><h4>核心卖点</h4><ul>${brief.selling_points.map((x) => `<li>${escapeHtml(x)}</li>`).join("")}</ul></div>
     <div class="brief-block"><h4>主角与主要冲突</h4><p><b>${escapeHtml(brief.protagonist)}</b><br>${escapeHtml(brief.main_conflict)}</p></div>
+    <div class="brief-block"><h4>读者契约与核心期待</h4><p>${escapeHtml(brief.reader_contract || "等待方案生成")}</p><p><b>当前期待：</b>${escapeHtml(brief.core_expectation || "等待方案生成")}</p></div>
     <div class="brief-block"><h4>世界规则</h4><ul>${brief.world_rules.map((x) => `<li>${escapeHtml(x)}</li>`).join("")}</ul></div>
     <div class="brief-block"><h4>连载计划</h4><p>${escapeHtml(brief.update_plan)}<br>预计 ${brief.total_chapters} 章 / ${brief.volume_count} 卷</p></div>
   </div>`;
@@ -184,6 +185,8 @@ function populateBriefEditor(brief) {
   set("protagonist_name", brief.protagonist_name || brief.protagonist);
   set("protagonist_profile", brief.protagonist_profile);
   set("main_conflict", brief.main_conflict);
+  set("reader_contract", brief.reader_contract);
+  set("core_expectation", brief.core_expectation);
   set("selling_points", brief.selling_points.join("\n"));
   set("world_rules", brief.world_rules.join("\n"));
   set("opening_three_chapters", brief.opening_three_chapters.join("\n"));
@@ -214,6 +217,8 @@ async function saveBriefEdit(event) {
     protagonist_name: String(form.get("protagonist_name")).trim(),
     protagonist_profile: String(form.get("protagonist_profile")).trim(),
     main_conflict: String(form.get("main_conflict")).trim(),
+    reader_contract: String(form.get("reader_contract")).trim(),
+    core_expectation: String(form.get("core_expectation")).trim(),
     world_rules: splitLines(form.get("world_rules")),
     total_chapters: Number(form.get("total_chapters")),
     volume_count: Number(form.get("volume_count")),

@@ -24,6 +24,8 @@ from novel_agent.models import (
 )
 from novel_agent.repository import SQLiteRepository
 from novel_agent.requirements import validate_requirements
+from novel_agent.story_skills import StorySkillsRuntime
+from novel_agent.writing_skills import OhStoryWritingRuntime
 from novel_agent.workflow import ChapterWorkflow
 
 
@@ -35,6 +37,8 @@ class NovelAgentService:
     max_revision_attempts: int = 2
     embedding: EmbeddingGateway = field(default_factory=DisabledEmbeddingGateway)
     semantic_retrieval_limit: int = 6
+    story_skills: StorySkillsRuntime = field(default_factory=StorySkillsRuntime.disabled)
+    writing_skills: OhStoryWritingRuntime = field(default_factory=OhStoryWritingRuntime.disabled)
 
     def create_novel(self, request: NovelCreateRequest) -> ProjectRecord:
         validate_requirements(request)
@@ -216,6 +220,8 @@ class NovelAgentService:
             max_revision_attempts=self.max_revision_attempts,
             embedding=self.embedding,
             semantic_retrieval_limit=self.semantic_retrieval_limit,
+            story_skills=self.story_skills,
+            writing_skills=self.writing_skills,
         )
         return workflow.run(project_id)
 
@@ -294,6 +300,22 @@ class NovelAgentService:
             "research_sources": self.repository.list_research_sources(project_id),
             "semantic_document_count": self.repository.semantic_document_count(project_id),
             "reserve_count": self.repository.reserve_count(project_id),
+            "skills": {
+                "story_skills": self.story_skills.readiness(),
+                "oh_story": {
+                    **self.writing_skills.readiness(),
+                    "active_genre_card": (
+                        card.name
+                        if (
+                            card := self.writing_skills.genre_card(
+                                project.request.genre,
+                                project.request.audience_channel,
+                            )
+                        )
+                        else None
+                    ),
+                },
+            },
         }
 
     def semantic_search(
@@ -323,7 +345,14 @@ class NovelAgentService:
     def _brief_fields(sections: list[str]) -> list[str]:
         groups = {
             "title": ["title_candidates", "selected_title"],
-            "story": ["synopsis", "target_readers", "selling_points", "main_conflict"],
+            "story": [
+                "synopsis",
+                "target_readers",
+                "selling_points",
+                "main_conflict",
+                "reader_contract",
+                "core_expectation",
+            ],
             "protagonist": [
                 "protagonist",
                 "protagonist_name",

@@ -17,6 +17,18 @@ def _load_env_file(path: Path) -> None:
         os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} 只能填写 true/false、1/0、yes/no 或 on/off")
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     mode: str
@@ -43,6 +55,8 @@ class Settings:
     publisher_provider: str
     publisher_api_key: str | None
     publisher_base_url: str | None
+    story_skills_enabled: bool
+    oh_story_enabled: bool
     max_revision_attempts: int = 2
 
     @classmethod
@@ -99,6 +113,8 @@ class Settings:
             publisher_provider=os.getenv("PUBLISHER_PROVIDER", "mock").lower(),
             publisher_api_key=os.getenv("PUBLISHER_API_KEY") or None,
             publisher_base_url=os.getenv("PUBLISHER_BASE_URL") or None,
+            story_skills_enabled=_env_bool("STORY_SKILLS_ENABLED", True),
+            oh_story_enabled=_env_bool("OH_STORY_ENABLED", True),
             max_revision_attempts=int(os.getenv("MAX_REVISION_ATTEMPTS", "2")),
         )
 

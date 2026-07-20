@@ -149,6 +149,8 @@ class CreativeBrief(StrictModel):
     opening_three_chapters: list[str]
     update_plan: str
     style_guide: list[str]
+    reader_contract: str = ""
+    core_expectation: str = ""
 
     @model_validator(mode="after")
     def normalize_protagonist(self) -> "CreativeBrief":
@@ -220,6 +222,15 @@ class CharacterMemoryBatch(StrictModel):
     characters: list[CharacterMemoryUpdate] = Field(default_factory=list, max_length=30)
 
 
+class SceneBeat(StrictModel):
+    sequence: int = Field(ge=1)
+    scene: str = Field(min_length=1, max_length=1000)
+    purpose: str = Field(min_length=1, max_length=300)
+    emotional_shift: str = Field(min_length=1, max_length=300)
+    intensity: Literal["dense", "normal", "sparse"] = "normal"
+    target_chars: int = Field(ge=40, le=3000)
+
+
 class ChapterPlan(StrictModel):
     number: int
     title: str
@@ -230,6 +241,35 @@ class ChapterPlan(StrictModel):
     scenes: list[str]
     research_questions: list[str] = Field(default_factory=list)
     character_updates: list[CharacterMemoryUpdate] = Field(default_factory=list, max_length=20)
+    story_stage: str = ""
+    plot_unit: str = ""
+    chapter_position: str = "推进"
+    target_emotion: str = ""
+    reader_payoff: str = ""
+    new_expectation: str = ""
+    protagonist_goal: str = ""
+    critical_choice: str = ""
+    opening_hook: str = ""
+    forbidden_releases: list[str] = Field(default_factory=list, max_length=12)
+    plotline_progress: dict[str, str] = Field(default_factory=dict)
+    relationship_changes: dict[str, str] = Field(default_factory=dict)
+    information_gap: list[str] = Field(default_factory=list, max_length=12)
+    scene_beats: list[SceneBeat] = Field(default_factory=list, max_length=20)
+
+
+class ProseFinding(StrictModel):
+    code: str
+    severity: IssueSeverity
+    message: str
+    suggestion: str
+    evidence: str = ""
+
+
+class ProseAuditReport(StrictModel):
+    level: Literal["clean", "light", "medium", "heavy"] = "clean"
+    score: float = Field(default=100, ge=0, le=100)
+    findings: list[ProseFinding] = Field(default_factory=list, max_length=100)
+    metrics: dict[str, float] = Field(default_factory=dict)
 
 
 class ReviewIssue(StrictModel):
@@ -237,6 +277,7 @@ class ReviewIssue(StrictModel):
     severity: IssueSeverity
     message: str
     suggestion: str
+    evidence: list[str] = Field(default_factory=list, max_length=12)
 
 
 class ReviewReport(StrictModel):
@@ -244,6 +285,25 @@ class ReviewReport(StrictModel):
     score: float = Field(ge=0, le=100)
     issues: list[ReviewIssue] = Field(default_factory=list)
     checks: dict[str, float] = Field(default_factory=dict)
+
+
+class ContinuityContext(StrictModel):
+    """Structured runtime input for the vendored Story Skills audit."""
+
+    skill_name: str
+    skill_source: str
+    project_id: str
+    chapter_number: int
+    creative_request: dict[str, Any]
+    creative_brief: dict[str, Any]
+    chapter_plan: dict[str, Any]
+    current_draft: str
+    recent_chapters: list[dict[str, Any]] = Field(default_factory=list, max_length=8)
+    characters: list[dict[str, Any]] = Field(default_factory=list, max_length=40)
+    world_facts: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
+    timeline: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
+    foreshadows: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
+    deterministic_findings: list[ReviewIssue] = Field(default_factory=list, max_length=100)
 
 
 class CharacterRecord(StrictModel):

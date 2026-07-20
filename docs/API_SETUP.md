@@ -11,7 +11,11 @@
 - `LLM_BASE_URL=https://api.deepseek.com`
 - `LLM_MODEL=deepseek-v4-pro`
 
-代码接入点：`novel_agent/adapters_remote.py` 的 `DeepSeekLLMGateway`。创作方案、结构化章节计划、正文生成和修订四类操作已经实现；结构化结果使用 JSON Output，并由 `novel_agent/models.py` 中的 Pydantic 模型再次校验。密钥缺失、鉴权失败、限流、超时、服务端错误、空响应和截断输出都有明确错误类型。
+代码接入点：`novel_agent/adapters_remote.py` 的 `DeepSeekLLMGateway`。创作方案、情绪优先的细化章节计划、题材化正文生成、去 AI 味处理、Story Skills 一致性审校和修订已经实现；结构化结果使用 JSON Output，并由 `novel_agent/models.py` 中的 Pydantic 模型再次校验。密钥缺失、鉴权失败、限流、超时、服务端错误、空响应和截断输出都有明确错误类型。
+
+`STORY_SKILLS_ENABLED=true` 默认启用固定的 `revision-continuity` 审校。在线模式下，初稿和每次自动修订后都会增加一次 DeepSeek 请求；设置为 `false` 并重启可以临时关闭。Story Skills 本身不需要额外 API Key。
+
+`OH_STORY_ENABLED=true` 默认启用固定版本的 oh-story `story-long-write` 与 `story-deslop`。系统会加载题材正文提示卡，并在每章初稿后增加一次 DeepSeek 去 AI 味请求；设置为 `false` 并重启可以临时关闭。oh-story 本身不需要额外 API Key，但在线模式的调用次数和费用会略有增加。
 
 ## 2. Tavily 搜索与网页阅读 API（已实现，联网研究需要）
 
@@ -59,10 +63,12 @@
 ## 安全启用顺序
 
 1. 先选择一个 LLM 供应商，只实现模型网关并跑现有回归测试。
-2. 使用非敏感示例项目验证结构化输出、重试、成本与超时。
+2. 使用非敏感示例项目验证结构化输出、情绪规划、题材卡、去 AI 味、Story Skills 复审、重试、成本与超时。
 3. 再接搜索，并检查来源追溯和搜索故障降级。
 4. 配置 Embedding，确认历史摘要自动回填和语义召回。
 5. 再迁移 PostgreSQL/Temporal，进行 30 章连续测试。
 6. 真实发布最后单独实施，并保留人工闸门和章节储备。
 
 在这些步骤完成前，保持 `NOVEL_AGENT_MODE=offline`。
+
+项目只读取已审查并固定版本的 Markdown 技能内容和题材卡，不执行 oh-story 上游仓库附带的安装脚本、Hooks、自定义 Agent 或 Node.js 脚本。SQLite 仍是唯一业务数据源。
