@@ -28,6 +28,8 @@ from novel_agent.models import (
     utc_now,
 )
 from novel_agent.repository import SQLiteRepository
+from novel_agent.story_skills import StorySkillsRuntime
+from novel_agent.writing_skills import OhStoryWritingRuntime
 
 
 class WorkflowBlocked(RuntimeError):
@@ -42,6 +44,8 @@ class ChapterWorkflow:
     max_revision_attempts: int = 2
     embedding: EmbeddingGateway = field(default_factory=DisabledEmbeddingGateway)
     semantic_retrieval_limit: int = 6
+    story_skills: StorySkillsRuntime = field(default_factory=StorySkillsRuntime.disabled)
+    writing_skills: OhStoryWritingRuntime = field(default_factory=OhStoryWritingRuntime.disabled)
     _events: list[RunEvent] = field(default_factory=list, init=False)
 
     def run(self, project_id: str) -> WorkflowResult:
@@ -122,7 +126,26 @@ class ChapterWorkflow:
                         level="WARN",
                     )
 
-            self._emit(run_id, project_id, chapter.id, "ChapterPlanner", "生成章节与场景计划", 15)
+            writing_guidance = self.writing_skills.chapter_guidance(
+                project.request.genre,
+                project.request.audience_channel,
+            )
+            if writing_guidance:
+                self._emit(
+                    run_id,
+                    project_id,
+                    chapter.id,
+                    "GenreProseCard",
+                    f"加载题材正文提示卡：{writing_guidance['genre_card_name']}",
+                    13,
+                    payload={
+                        "skill": writing_guidance["skill"],
+                        "source": writing_guidance["source"],
+                        "genre_card": writing_guidance["genre_card_name"],
+                        "confidence": writing_guidance["genre_card_confidence"],
+                    },
+                )
+            self._emit(run_id, project_id, chapter.id, "ChapterPlanner", "按目标情绪生成章节细纲", 15)
             plan = self.gateway.plan_chapter(
                 project.request,
                 project.brief,
@@ -130,6 +153,12 @@ class ChapterWorkflow:
                 summaries,
                 open_threads,
                 character_roster,
+                writing_guidance,
+            )
+            plan = self.writing_skills.normalize_plan(
+                plan,
+                total_chapters=project.brief.total_chapters,
+                target_chars=project.request.chapter_target_chars,
             )
             chapter = self.repository.update_chapter(
                 chapter.id, status=ChapterStatus.PLANNED, plan=plan, title=plan.title
@@ -194,7 +223,7 @@ class ChapterWorkflow:
                 self._emit(run_id, project_id, chapter.id, "ResearchDecision", "本章无需外部调研", 28)
 
             chapter = self.repository.update_chapter(chapter.id, status=ChapterStatus.WRITING)
-            self._emit(run_id, project_id, chapter.id, "Writer", "按场景计划生成章节草稿", 42)
+            self._emit(run_id, project_id, chapter.id, "Writer", "按情绪细纲与题材提示卡生成章节草稿", 42)
             protagonist = next(
                 (item for item in character_roster if item.role == "protagonist"),
                 character_roster[0],
@@ -206,12 +235,59 @@ class ChapterWorkflow:
                 protagonist.name,
                 research_notes,
                 character_roster,
+                writing_guidance.get("genre_prose_card", ""),
             )
             self.repository.save_draft_version(
                 chapter.id,
                 content,
                 {"gateway": self.gateway.name, "plan": plan.model_dump(mode="json")},
             )
+
+            if self.writing_skills.enabled:
+                before_audit = self.writing_skills.audit_prose(content)
+                polished = self.gateway.deslop_chapter(
+                    content,
+                    plan,
+                    writing_guidance.get("genre_prose_card", ""),
+                    self.writing_skills.deslop_guidance(),
+                )
+                if polished.strip():
+                    content = polished
+                after_audit = self.writing_skills.audit_prose(content)
+                if polished.strip():
+                    self.repository.save_draft_version(
+                        chapter.id,
+                        content,
+                        {
+                            "stage": "story-deslop",
+                            "skill_source": self.writing_skills.source_commit,
+                            "before": before_audit.model_dump(mode="json"),
+                            "after": after_audit.model_dump(mode="json"),
+                        },
+                    )
+                self._emit(
+                    run_id,
+                    project_id,
+                    chapter.id,
+                    "ProsePolish",
+                    (
+                        "story-deslop 去 AI 味完成："
+                        f"{before_audit.level} → {after_audit.level}，"
+                        f"剩余 {len(after_audit.findings)} 项"
+                    ),
+                    52,
+                    level="WARN" if any(
+                        item.severity in {IssueSeverity.BLOCKER, IssueSeverity.MAJOR}
+                        for item in after_audit.findings
+                    ) else "INFO",
+                    payload={
+                        "skill": "story-deslop",
+                        "source": self.writing_skills.source_commit,
+                        "before_score": before_audit.score,
+                        "after_score": after_audit.score,
+                        "remaining_findings": len(after_audit.findings),
+                    },
+                )
 
             report = ReviewReport(decision=ReviewDecision.REVISE, score=0)
             for attempt in range(self.max_revision_attempts + 1):
@@ -224,7 +300,57 @@ class ChapterWorkflow:
                     f"执行一致性、禁用项、篇幅、重复度与文本审核（第 {attempt + 1} 次）",
                     58 + attempt * 10,
                 )
-                report = self._review(project, plan, protagonist.name, content, bool(research_notes))
+                base_report = self._review(
+                    project,
+                    plan,
+                    protagonist.name,
+                    content,
+                    bool(research_notes),
+                )
+                if self.writing_skills.enabled:
+                    prose_audit = self.writing_skills.audit_prose(content)
+                    report = self._merge_review_reports(
+                        base_report,
+                        self.writing_skills.as_review_report(prose_audit),
+                    )
+                else:
+                    report = base_report
+                if self.story_skills.enabled:
+                    skill_report = self.story_skills.audit(
+                        self.repository,
+                        self.gateway,
+                        project,
+                        plan,
+                        content,
+                    )
+                    report = self._merge_review_reports(report, skill_report)
+                    blocker_count = sum(
+                        issue.severity == IssueSeverity.BLOCKER
+                        for issue in skill_report.issues
+                    )
+                    major_count = sum(
+                        issue.severity == IssueSeverity.MAJOR
+                        for issue in skill_report.issues
+                    )
+                    self._emit(
+                        run_id,
+                        project_id,
+                        chapter.id,
+                        "StorySkillsAudit",
+                        (
+                            "Story Skills 一致性审校完成："
+                            f"{blocker_count} 个阻断、{major_count} 个主要问题，"
+                            f"得分 {skill_report.score:.0f}"
+                        ),
+                        62 + attempt * 10,
+                        level="WARN" if skill_report.decision != ReviewDecision.PASS else "INFO",
+                        payload={
+                            "skill": "revision-continuity",
+                            "source": self.story_skills.source_commit,
+                            "decision": skill_report.decision.value,
+                            "score": skill_report.score,
+                        },
+                    )
                 if report.decision == ReviewDecision.PASS:
                     break
                 if report.decision == ReviewDecision.HUMAN_REQUIRED or attempt >= self.max_revision_attempts:
@@ -339,6 +465,39 @@ class ChapterWorkflow:
                 level="ERROR",
             )
             raise
+
+    @staticmethod
+    def _merge_review_reports(
+        base: ReviewReport,
+        story_skills: ReviewReport,
+    ) -> ReviewReport:
+        issues: list[ReviewIssue] = []
+        seen: set[tuple[str, str]] = set()
+        for issue in [*base.issues, *story_skills.issues]:
+            key = (issue.category, issue.message)
+            if key in seen:
+                continue
+            seen.add(key)
+            issues.append(issue)
+        score = min(base.score, story_skills.score)
+        if ReviewDecision.HUMAN_REQUIRED in {
+            base.decision,
+            story_skills.decision,
+        }:
+            decision = ReviewDecision.HUMAN_REQUIRED
+        elif (
+            ReviewDecision.REVISE in {base.decision, story_skills.decision}
+            or score < 80
+        ):
+            decision = ReviewDecision.REVISE
+        else:
+            decision = ReviewDecision.PASS
+        return ReviewReport(
+            decision=decision,
+            score=score,
+            issues=issues,
+            checks={**base.checks, **story_skills.checks},
+        )
 
     @staticmethod
     def _merge_character_updates(

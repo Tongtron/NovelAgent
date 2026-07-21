@@ -1009,6 +1009,15 @@ class SQLiteRepository:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_foreshadows(self, project_id: str) -> list[dict[str, Any]]:
+        with self.connection() as conn:
+            rows = conn.execute(
+                """SELECT * FROM foreshadows WHERE project_id=?
+                ORDER BY introduced_chapter,id""",
+                (project_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def save_research_sources(
         self,
         project_id: str,

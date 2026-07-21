@@ -12,6 +12,8 @@ from novel_agent.api import AppContext
 from novel_agent.config import Settings
 from novel_agent.repository import SQLiteRepository
 from novel_agent.service import NovelAgentService
+from novel_agent.story_skills import StorySkillsRuntime
+from novel_agent.writing_skills import OhStoryWritingRuntime
 
 
 def create_context(root: Path | None = None, database_path: Path | None = None) -> AppContext:
@@ -45,6 +47,14 @@ def create_context(root: Path | None = None, database_path: Path | None = None) 
         model=settings.embedding_model,
         timeout_seconds=settings.embedding_timeout_seconds,
     )
+    story_skills = StorySkillsRuntime.load(
+        root,
+        enabled=settings.story_skills_enabled,
+    )
+    writing_skills = OhStoryWritingRuntime.load(
+        root,
+        enabled=settings.oh_story_enabled,
+    )
     service = NovelAgentService(
         repository=repository,
         gateway=gateway,
@@ -52,5 +62,7 @@ def create_context(root: Path | None = None, database_path: Path | None = None) 
         embedding=embedding,
         max_revision_attempts=settings.max_revision_attempts,
         semantic_retrieval_limit=settings.semantic_retrieval_limit,
+        story_skills=story_skills,
+        writing_skills=writing_skills,
     )
     return AppContext(settings, service, repository, root / "apps" / "web")
