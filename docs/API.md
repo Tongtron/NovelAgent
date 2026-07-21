@@ -4,7 +4,7 @@
 
 | 方法 | 路径 | 作用 |
 |---|---|---|
-| GET | `/api/health` | 运行模式、数据库和外部 API 就绪状态 |
+| GET | `/api/health` | 运行模式、数据库、外部 API 与写作技能就绪状态 |
 | GET | `/api/novels/{id}/research` | 已保存的网页研究来源与核验状态 |
 | GET | `/api/novels/{id}/brief-versions` | 查看并对比创作方案历史版本 |
 | POST | `/api/novels/{id}/semantic-search` | 在章节摘要和研究资料中执行语义检索；请求体包含 `query` 与可选 `limit` |
@@ -15,7 +15,7 @@
 | GET | `/api/tags` | 男频/女频频道目录，以及各频道独立的题材、体验、元素、主角与感情线标签 |
 | POST | `/api/novels` | 创建项目与创作方案 |
 | GET | `/api/novels` | 项目列表 |
-| GET | `/api/novels/{id}` | 项目、章节、人物、世界与时间线聚合详情 |
+| GET | `/api/novels/{id}` | 项目、章节、人物、世界、时间线与已加载 Skill 聚合详情 |
 | POST | `/api/novels/{id}/confirm` | 确认创作方案 |
 | POST | `/api/novels/{id}/pause` | 暂停自动写作 |
 | POST | `/api/novels/{id}/resume` | 恢复自动写作 |
@@ -25,7 +25,7 @@
 | POST | `/api/novels/{id}/characters/rebuild` | 扫描全部 READY 章节，重建重要人物档案并清理非重要人物；在线模式会调用大模型 |
 | GET | `/api/novels/{id}/world` | 世界硬规则与时间线 |
 | GET | `/api/runs/{id}/events` | SSE 格式的工作流节点事件 |
-| GET/PUT | `/api/settings` | API 就绪状态与非敏感本地偏好 |
+| GET/PUT | `/api/settings` | API、写作技能就绪状态与非敏感本地偏好 |
 | GET | `/api/publishing` | Mock 发布状态与安全提示 |
 
 ## 创建示例
@@ -48,3 +48,7 @@
 ```
 
 冲突标签返回 HTTP 409；非法结构返回 HTTP 422；尚未确认、已暂停或需人工处理的项目运行工作流时返回 HTTP 409。
+
+`/api/health` 的 `apis.story_skills`、`apis.oh_story`，以及 `/api/settings` 的 `runtime.story_skills`、`runtime.oh_story` 会返回对应技能的固定来源、提交版本、已加载 Skill 名称、题材卡数量与启用状态。项目详情的 `skills` 会返回 `story_skills` 和 `oh_story`，当前项目匹配到的题材卡位于 `skills.oh_story.active_genre_card`。这些信息不包含 API Key 或完整正文。
+
+章节规划数据除原有的目标、阻力、转折和钩子外，还包含全书阶段、剧情单元、读者目标情绪、本章爽点、新期待、主角目标和关键选择、多条剧情线推进、人物关系变化、信息差与场景情绪节拍。旧项目缺少这些字段时，运行时会根据现有方案补齐默认值。

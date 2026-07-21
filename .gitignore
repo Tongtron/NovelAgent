@@ -17,3 +17,6 @@ dist/
 data/
 exports/
 .tmp/
+/.idea/
+/.venv*/
+/Novel_Agent_个人自主小说作者智能体_初步项目策划书_V0.1.docx

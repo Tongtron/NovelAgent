@@ -11,8 +11,11 @@ from novel_agent.models import (
     CharacterMemoryUpdate,
     CharacterProfile,
     CharacterRecord,
+    ContinuityContext,
     CreativeBrief,
     NovelCreateRequest,
+    ReviewDecision,
+    ReviewReport,
 )
 
 
@@ -41,6 +44,7 @@ class LLMGateway(Protocol):
         recent_summaries: list[str],
         open_threads: list[str],
         character_roster: list[CharacterRecord] | None = None,
+        writing_guidance: dict[str, str] | None = None,
     ) -> ChapterPlan: ...
 
     def write_chapter(
@@ -51,6 +55,15 @@ class LLMGateway(Protocol):
         protagonist_name: str,
         research_notes: list[str],
         character_roster: list[CharacterRecord] | None = None,
+        genre_prose_card: str = "",
+    ) -> str: ...
+
+    def deslop_chapter(
+        self,
+        content: str,
+        plan: ChapterPlan,
+        genre_prose_card: str,
+        skill_instructions: str,
     ) -> str: ...
 
     def revise_chapter(self, content: str, instructions: list[str], target_chars: int) -> str: ...
@@ -62,6 +75,12 @@ class LLMGateway(Protocol):
         content: str,
         character_roster: list[CharacterRecord] | None = None,
     ) -> CharacterMemoryBatch: ...
+
+    def review_continuity(
+        self,
+        context: ContinuityContext,
+        skill_instructions: str,
+    ) -> ReviewReport: ...
 
 
 class SearchAdapter(Protocol):
@@ -141,7 +160,13 @@ class DisabledRemoteGateway:
     def revise_chapter(self, *args: object, **kwargs: object) -> str:
         self._blocked()
 
+    def deslop_chapter(self, *args: object, **kwargs: object) -> str:
+        self._blocked()
+
     def extract_character_memories(self, *args: object, **kwargs: object) -> CharacterMemoryBatch:
+        self._blocked()
+
+    def review_continuity(self, *args: object, **kwargs: object) -> ReviewReport:
         self._blocked()
 
 
@@ -256,6 +281,8 @@ class OfflineLLMGateway:
                 f"READY 储备安全线 {request.reserve_target} 章"
             ),
             style_guide=style,
+            reader_contract=f"持续交付{experiences}，让主角通过可验证的选择推进{request.genre}主线",
+            core_expectation="主角用有限资源取得阶段成果，并发现更高层级的阻力",
         )
 
     def revise_brief(
@@ -279,6 +306,7 @@ class OfflineLLMGateway:
         recent_summaries: list[str],
         open_threads: list[str],
         character_roster: list[CharacterRecord] | None = None,
+        writing_guidance: dict[str, str] | None = None,
     ) -> ChapterPlan:
         arc = (chapter_number - 1) // 10 + 1
         step = (chapter_number - 1) % 10 + 1
@@ -332,6 +360,22 @@ class OfflineLLMGateway:
             ],
             research_questions=research_questions,
             character_updates=character_updates,
+            story_stage="开篇期" if chapter_number <= max(3, brief.total_chapters * 0.15) else "发展期",
+            plot_unit=f"剧情单元-{arc}",
+            chapter_position="推进",
+            target_emotion="不确定与紧张 → 取得阶段成果后的掌控感",
+            reader_payoff=f"看见{element}方案产生可验证成果",
+            new_expectation=f"{thread}背后的原因将如何改变下一步行动",
+            protagonist_goal=objective,
+            critical_choice="在保留撤退路线的前提下承担有限代价，验证关键方案",
+            opening_hook="上一阶段留下的异常记录出现新的现实后果",
+            forbidden_releases=["异常来源的最终真相", "无代价解决全部资源问题"],
+            plotline_progress={"主线": objective, "谜团线": f"获得关于{thread}的新证据"},
+            relationship_changes=(
+                {supporting.name: "从谨慎合作转为愿意共同承担一次风险"}
+                if supporting else {}
+            ),
+            information_gap=[f"主角知道记录异常，其他人只看见{element}行动的结果"],
         )
 
     def write_chapter(
@@ -342,6 +386,7 @@ class OfflineLLMGateway:
         protagonist_name: str,
         research_notes: list[str],
         character_roster: list[CharacterRecord] | None = None,
+        genre_prose_card: str = "",
     ) -> str:
         seed = int(hashlib.sha256(f"{brief.selected_title}:{plan.number}".encode()).hexdigest()[:8], 16)
         rng = random.Random(seed)
@@ -416,6 +461,28 @@ class OfflineLLMGateway:
             cycle += 1
         return content
 
+    def deslop_chapter(
+        self,
+        content: str,
+        plan: ChapterPlan,
+        genre_prose_card: str,
+        skill_instructions: str,
+    ) -> str:
+        """Deterministic offline approximation of the vendored deslop contract."""
+        replacements = {
+            "深吸一口气": "把话咽了回去",
+            "眼中闪过一丝": "垂下眼，",
+            "嘴角勾起一抹": "笑了一声，",
+            "他终于明白": "他把目光落回眼前",
+            "她终于明白": "她把目光落回眼前",
+            "——": "，",
+            "—": "，",
+        }
+        polished = content
+        for source, target in replacements.items():
+            polished = polished.replace(source, target)
+        return polished
+
     def extract_character_memories(
         self,
         brief: CreativeBrief,
@@ -435,6 +502,18 @@ class OfflineLLMGateway:
                 )
             )
         return CharacterMemoryBatch(characters=updates)
+
+    def review_continuity(
+        self,
+        context: ContinuityContext,
+        skill_instructions: str,
+    ) -> ReviewReport:
+        """Offline mode still invokes the Skill contract without an external model."""
+        return ReviewReport(
+            decision=ReviewDecision.PASS,
+            score=100,
+            checks={"semantic": 100},
+        )
 
     def revise_chapter(self, content: str, instructions: list[str], target_chars: int) -> str:
         revised = content
