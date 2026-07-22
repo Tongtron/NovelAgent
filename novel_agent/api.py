@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import re
+import traceback
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -11,8 +12,21 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
+from novel_agent.adapters import APIConfigurationRequired
+from novel_agent.adapters_remote import (
+    LLMAuthenticationError,
+    LLMProviderError,
+    LLMRateLimitError,
+    LLMResponseError,
+    LLMTimeoutError,
+)
 from novel_agent.config import Settings
-from novel_agent.models import BriefRegenerateRequest, CreativeBrief, NovelCreateRequest
+from novel_agent.models import (
+    BriefRegenerateRequest,
+    ChapterStatus,
+    CreativeBrief,
+    NovelCreateRequest,
+)
 from novel_agent.repository import RepositoryError, SQLiteRepository
 from novel_agent.requirements import RequirementConflict
 from novel_agent.service import NovelAgentService
@@ -80,6 +94,16 @@ class NovelAgentHandler(BaseHTTPRequestHandler):
             if match:
                 self._send_json({"items": self.context.repository.list_chapters(match.group(1))})
                 return
+            match = re.fullmatch(r"/api/novels/([^/]+)/chapters/(\d+)/versions", path)
+            if match:
+                self._send_json(
+                    {
+                        "items": self.context.repository.list_chapter_versions(
+                            match.group(1), int(match.group(2))
+                        )
+                    }
+                )
+                return
             match = re.fullmatch(r"/api/novels/([^/]+)/characters", path)
             if match:
                 self._send_json({"items": self.context.repository.list_characters(match.group(1))})
@@ -116,6 +140,22 @@ class NovelAgentHandler(BaseHTTPRequestHandler):
                         "runtime": self._runtime_readiness(),
                         "preferences": self.context.repository.list_settings(),
                     }
+                )
+                return
+            if path == "/api/usage":
+                self._send_json(self.context.service.get_usage())
+                return
+            if path == "/api/token/statistics":
+                query = dict(
+                    item.split("=", 1)
+                    for item in self.path.split("?", 1)[1].split("&")
+                    if "=" in item
+                ) if "?" in self.path else {}
+                self._send_json(
+                    self.context.service.get_token_statistics(
+                        start_date=query.get("start_date", ""),
+                        end_date=query.get("end_date", ""),
+                    )
                 )
                 return
             if path == "/api/publishing":
@@ -155,9 +195,12 @@ class NovelAgentHandler(BaseHTTPRequestHandler):
             if match:
                 project_id = match.group(1)
                 count = max(1, min(int(payload.get("count", 1)), 10))
-                results = [
-                    self.context.service.generate_next_chapter(project_id) for _ in range(count)
-                ]
+                results = []
+                for _ in range(count):
+                    result = self.context.service.generate_next_chapter(project_id)
+                    results.append(result)
+                    if result.chapter.status == ChapterStatus.FAILED:
+                        break
                 self._send_json({"items": results})
                 return
             match = re.fullmatch(r"/api/novels/([^/]+)/characters/rebuild", path)
@@ -191,6 +234,17 @@ class NovelAgentHandler(BaseHTTPRequestHandler):
                             int(payload.get("limit", 6)),
                         )
                     }
+                )
+                return
+            match = re.fullmatch(r"/api/novels/([^/]+)/chapters/(\d+)/rework", path)
+            if match:
+                project_id = match.group(1)
+                chapter_number = int(match.group(2))
+                feedback = str(payload.get("feedback", "")).strip()[:2000]
+                self._send_json(
+                    self.context.service.rework_chapter(
+                        project_id, chapter_number, feedback=feedback
+                    )
                 )
                 return
             self._send_json({"error": "NOT_FOUND", "message": "接口不存在"}, HTTPStatus.NOT_FOUND)
@@ -230,7 +284,12 @@ class NovelAgentHandler(BaseHTTPRequestHandler):
                     HTTPStatus.NOT_FOUND,
                 )
                 return
-            self.context.service.delete_draft_novel(match.group(1))
+            payload = self._read_json()
+            self.context.service.delete_novel(
+                match.group(1),
+                confirmation_title=str(payload.get("confirmation_title", "")).strip()
+                or None,
+            )
             self._send_json({"deleted": True, "project_id": match.group(1)})
         except Exception as exc:
             self._handle_error(exc)
@@ -293,9 +352,13 @@ class NovelAgentHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _cors_headers(self) -> None:
-        self.send_header("Access-Control-Allow-Origin", "*")
+        origin = self.headers.get("Origin", "").rstrip("/")
+        host = self.headers.get("Host", "")
+        if origin and host and origin in {f"http://{host}", f"https://{host}"}:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.send_header("Access-Control-Allow-Methods", "GET,POST,PUT,OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
 
     def _handle_error(self, exc: Exception) -> None:
         status = HTTPStatus.INTERNAL_SERVER_ERROR
@@ -319,6 +382,26 @@ class NovelAgentHandler(BaseHTTPRequestHandler):
         elif isinstance(exc, (ValueError, json.JSONDecodeError)):
             status = HTTPStatus.BAD_REQUEST
             error = "BAD_REQUEST"
+        elif isinstance(exc, APIConfigurationRequired):
+            status = HTTPStatus.SERVICE_UNAVAILABLE
+            error = "API_NOT_CONFIGURED"
+        elif isinstance(exc, LLMAuthenticationError):
+            status = HTTPStatus.BAD_GATEWAY
+            error = "LLM_AUTH_ERROR"
+        elif isinstance(exc, LLMRateLimitError):
+            status = HTTPStatus.TOO_MANY_REQUESTS
+            error = "LLM_RATE_LIMITED"
+        elif isinstance(exc, LLMTimeoutError):
+            status = HTTPStatus.GATEWAY_TIMEOUT
+            error = "LLM_TIMEOUT"
+        elif isinstance(exc, LLMResponseError):
+            status = HTTPStatus.BAD_GATEWAY
+            error = "LLM_RESPONSE_ERROR"
+        elif isinstance(exc, LLMProviderError):
+            status = HTTPStatus.BAD_GATEWAY
+            error = "LLM_PROVIDER_ERROR"
+        else:
+            traceback.print_exc()
         self._send_json({"error": error, "message": message, "details": details}, status)
 
 

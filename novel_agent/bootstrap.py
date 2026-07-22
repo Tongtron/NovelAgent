@@ -10,6 +10,7 @@ from novel_agent.adapters import (
 )
 from novel_agent.api import AppContext
 from novel_agent.config import Settings
+from novel_agent.memory_manager import MemoryManager
 from novel_agent.repository import SQLiteRepository
 from novel_agent.service import NovelAgentService
 from novel_agent.story_skills import StorySkillsRuntime
@@ -30,6 +31,7 @@ def create_context(root: Path | None = None, database_path: Path | None = None) 
         model=settings.llm_model,
         timeout_seconds=settings.llm_timeout_seconds,
         max_retries=settings.llm_max_retries,
+        reasoning_budget_factor=settings.llm_reasoning_budget_factor,
     )
     search = build_search_adapter(
         settings.mode,
@@ -55,6 +57,16 @@ def create_context(root: Path | None = None, database_path: Path | None = None) 
         root,
         enabled=settings.oh_story_enabled,
     )
+    if hasattr(gateway, "_on_usage"):
+        gateway._on_usage = repository.save_token_usage  # type: ignore[attr-defined]
+    memory_manager = MemoryManager(
+        hot_budget_tokens=settings.memory_budget_tokens,
+        character_chapter_gap=settings.memory_character_gap,
+        world_fact_chapter_gap=settings.memory_world_fact_gap,
+        timeline_chapter_gap=settings.memory_timeline_gap,
+        research_chapter_gap=settings.memory_research_gap,
+        research_reliability_min=settings.memory_research_reliability,
+    )
     service = NovelAgentService(
         repository=repository,
         gateway=gateway,
@@ -64,5 +76,6 @@ def create_context(root: Path | None = None, database_path: Path | None = None) 
         semantic_retrieval_limit=settings.semantic_retrieval_limit,
         story_skills=story_skills,
         writing_skills=writing_skills,
+        memory_manager=memory_manager,
     )
     return AppContext(settings, service, repository, root / "apps" / "web")

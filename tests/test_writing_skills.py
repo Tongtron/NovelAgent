@@ -28,6 +28,10 @@ class RecordingWritingGateway(OfflineLLMGateway):
         open_threads,
         character_roster=None,
         writing_guidance=None,
+        compact_characters=None,
+        compact_world_facts=None,
+        compact_timeline=None,
+        previous_chapter_excerpt="",
     ):
         self.plan_guidance = writing_guidance or {}
         return super().plan_chapter(
@@ -38,6 +42,10 @@ class RecordingWritingGateway(OfflineLLMGateway):
             open_threads,
             character_roster,
             writing_guidance,
+            compact_characters,
+            compact_world_facts,
+            compact_timeline,
+            previous_chapter_excerpt,
         )
 
     def write_chapter(
@@ -49,6 +57,8 @@ class RecordingWritingGateway(OfflineLLMGateway):
         research_notes,
         character_roster=None,
         genre_prose_card="",
+        compact_characters=None,
+        previous_chapter_excerpt="",
     ):
         self.writer_card = genre_prose_card
         return super().write_chapter(
@@ -59,6 +69,8 @@ class RecordingWritingGateway(OfflineLLMGateway):
             research_notes,
             character_roster,
             genre_prose_card,
+            compact_characters,
+            previous_chapter_excerpt,
         )
 
     def deslop_chapter(

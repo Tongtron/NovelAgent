@@ -251,6 +251,20 @@ class SQLiteRepository:
                     value_json TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS token_usage (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    date TEXT NOT NULL,
+                    operation TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+                    completion_tokens INTEGER NOT NULL DEFAULT 0,
+                    total_tokens INTEGER NOT NULL DEFAULT 0,
+                    retry_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_token_usage_date
+                ON token_usage(date);
                 """
             )
             columns = {
@@ -292,6 +306,13 @@ class SQLiteRepository:
             else str(item),
         )
 
+    @staticmethod
+    def _required_row(row: sqlite3.Row | None, operation: str) -> sqlite3.Row:
+        """Narrow SQLite's optional fetch result for queries that must return one row."""
+        if row is None:
+            raise RepositoryError(f"数据库查询未返回结果：{operation}")
+        return row
+
     def create_project(
         self,
         project: ProjectRecord,
@@ -301,7 +322,8 @@ class SQLiteRepository:
         with self.transaction() as conn:
             conn.execute(
                 """INSERT INTO projects
-                (id,title,status,request_json,brief_json,confirmed,current_chapter,created_at,updated_at)
+                (id,title,status,request_json,brief_json,confirmed,current_chapter,
+                 created_at,updated_at)
                 VALUES (?,?,?,?,?,?,?,?,?)""",
                 (
                     project.id,
@@ -403,18 +425,26 @@ class SQLiteRepository:
                 raise RepositoryError(f"找不到小说项目：{project_id}")
             if project["status"] != ProjectStatus.DRAFT.value or bool(project["confirmed"]):
                 raise RepositoryError("创作方案确认后不能直接修改，请创建正式设定变更流程")
-            chapter_count = conn.execute(
-                "SELECT COUNT(*) AS count FROM chapters WHERE project_id=?", (project_id,)
-            ).fetchone()["count"]
+            count_row = self._required_row(
+                conn.execute(
+                    "SELECT COUNT(*) AS count FROM chapters WHERE project_id=?",
+                    (project_id,),
+                ).fetchone(),
+                "统计项目章节",
+            )
+            chapter_count = int(count_row["count"])
             if chapter_count:
                 raise RepositoryError("项目已有章节，不能按草稿方案修改")
             request = NovelCreateRequest.model_validate_json(project["request_json"])
-            next_version = int(
+            version_row = self._required_row(
                 conn.execute(
-                    "SELECT COALESCE(MAX(version),0)+1 AS value FROM brief_versions WHERE project_id=?",
+                    """SELECT COALESCE(MAX(version),0)+1 AS value
+                    FROM brief_versions WHERE project_id=?""",
                     (project_id,),
-                ).fetchone()["value"]
+                ).fetchone(),
+                "计算创作方案版本",
             )
+            next_version = int(version_row["value"])
             conn.execute(
                 """UPDATE projects SET title=?,brief_json=?,updated_at=? WHERE id=?""",
                 (brief.selected_title, self._dump(brief), now, project_id),
@@ -551,22 +581,192 @@ class SQLiteRepository:
             raise RepositoryError(f"找不到方案版本：v{version}")
         return CreativeBrief.model_validate_json(row["brief_json"])
 
-    def delete_draft_project(self, project_id: str) -> None:
+    def delete_project(self, project_id: str, *, force: bool = False) -> None:
         with self.transaction() as conn:
             project = conn.execute(
                 "SELECT status,confirmed FROM projects WHERE id=?", (project_id,)
             ).fetchone()
             if project is None:
                 raise RepositoryError(f"找不到小说项目：{project_id}")
-            if project["status"] != ProjectStatus.DRAFT.value or bool(project["confirmed"]):
-                raise RepositoryError("只能删除尚未确认的草稿项目")
+            if not force:
+                if project["status"] != ProjectStatus.DRAFT.value or bool(project["confirmed"]):
+                    raise RepositoryError("只能删除尚未确认的草稿项目")
+            conn.execute("DELETE FROM publish_tasks WHERE project_id=?", (project_id,))
             conn.execute("DELETE FROM projects WHERE id=?", (project_id,))
+
+    def rework_chapter(
+        self,
+        project_id: str,
+        chapter_number: int,
+        *,
+        base_characters: list[CharacterRecord],
+        feedback: str = "",
+    ) -> ProjectRecord:
+        with self.transaction() as conn:
+            project = conn.execute(
+                "SELECT * FROM projects WHERE id=?", (project_id,)
+            ).fetchone()
+            if project is None:
+                raise RepositoryError(f"找不到小说项目：{project_id}")
+            chapter = conn.execute(
+                "SELECT * FROM chapters WHERE project_id=? AND number=?",
+                (project_id, chapter_number),
+            ).fetchone()
+            if chapter is None:
+                raise RepositoryError(f"找不到第{chapter_number}章")
+            now = utc_now()
+            affected = conn.execute(
+                "SELECT id FROM chapters WHERE project_id=? AND number>=?",
+                (project_id, chapter_number),
+            ).fetchall()
+            affected_ids = [row["id"] for row in affected]
+            placeholders = ",".join("?" for _ in affected_ids)
+
+            retained = conn.execute(
+                """SELECT c.number,c.plan_json,cv.metadata_json
+                FROM chapters c
+                LEFT JOIN chapter_versions cv ON cv.id=(
+                    SELECT id FROM chapter_versions
+                    WHERE chapter_id=c.id AND kind='FINAL'
+                    ORDER BY version DESC LIMIT 1
+                )
+                WHERE c.project_id=? AND c.number<? AND c.status=?
+                ORDER BY c.number""",
+                (project_id, chapter_number, ChapterStatus.READY.value),
+            ).fetchall()
+            retained_updates: list[tuple[int, list[CharacterMemoryUpdate]]] = []
+            for row in retained:
+                raw_updates: list[Any] = []
+                if row["metadata_json"]:
+                    metadata = json.loads(row["metadata_json"])
+                    raw_updates = metadata.get("character_updates") or []
+                if not raw_updates and row["plan_json"]:
+                    raw_updates = json.loads(row["plan_json"]).get("character_updates") or []
+                updates = [CharacterMemoryUpdate.model_validate(item) for item in raw_updates]
+                retained_updates.append((int(row["number"]), updates))
+
+            research_rows = conn.execute(
+                f"""SELECT id FROM research_sources
+                WHERE project_id=? AND chapter_id IN ({placeholders})""",
+                (project_id, *affected_ids),
+            ).fetchall()
+            research_ids = [str(row["id"]) for row in research_rows]
+            conn.execute(
+                f"""DELETE FROM semantic_documents
+                WHERE project_id=? AND chapter_id IN ({placeholders})""",
+                (project_id, *affected_ids),
+            )
+            if research_ids:
+                research_placeholders = ",".join("?" for _ in research_ids)
+                conn.execute(
+                    f"""DELETE FROM semantic_documents WHERE project_id=?
+                    AND source_type='research_source' AND source_id IN ({research_placeholders})""",
+                    (project_id, *research_ids),
+                )
+            conn.execute(
+                f"""DELETE FROM research_sources
+                WHERE project_id=? AND chapter_id IN ({placeholders})""",
+                (project_id, *affected_ids),
+            )
+            conn.execute(
+                f"DELETE FROM review_reports WHERE chapter_id IN ({placeholders})",
+                affected_ids,
+            )
+            conn.execute(
+                f"DELETE FROM publish_tasks WHERE chapter_id IN ({placeholders})",
+                affected_ids,
+            )
+            conn.execute(
+                f"DELETE FROM runs WHERE project_id=? AND chapter_id IN ({placeholders})",
+                (project_id, *affected_ids),
+            )
+            conn.execute(
+                f"DELETE FROM chapter_versions WHERE chapter_id IN ({placeholders})",
+                affected_ids,
+            )
+            feedback_keys = [f"rework_feedback:{chapter_id}" for chapter_id in affected_ids]
+            feedback_placeholders = ",".join("?" for _ in feedback_keys)
+            conn.execute(
+                f"DELETE FROM settings WHERE key IN ({feedback_placeholders})",
+                feedback_keys,
+            )
+            conn.execute(
+                """UPDATE chapters SET status=?, content=NULL, summary=NULL,
+                plan_json=NULL, version=0, locked=0, updated_at=?
+                WHERE project_id=? AND number>=?""",
+                (ChapterStatus.PLANNED.value, now, project_id, chapter_number),
+            )
+            if feedback.strip():
+                conn.execute(
+                    """INSERT INTO settings(key, value_json, updated_at) VALUES (?,?,?)
+                    ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,
+                    updated_at=excluded.updated_at""",
+                    (
+                        f"rework_feedback:{chapter['id']}",
+                        self._dump(feedback.strip()),
+                        now,
+                    ),
+                )
+            conn.execute(
+                "DELETE FROM timeline_events WHERE project_id=? AND chapter_number>=?",
+                (project_id, chapter_number),
+            )
+            conn.execute(
+                "DELETE FROM world_facts WHERE project_id=? AND evidence_chapter>=?",
+                (project_id, chapter_number),
+            )
+            conn.execute(
+                "DELETE FROM foreshadows WHERE project_id=? AND introduced_chapter>=?",
+                (project_id, chapter_number),
+            )
+            conn.execute(
+                """UPDATE foreshadows SET status='OPEN',resolved_chapter=NULL
+                WHERE project_id=? AND resolved_chapter>=?""",
+                (project_id, chapter_number),
+            )
+
+            # Rebuild character memory from the creative brief and retained
+            # official chapters. This prevents facts learned only in removed
+            # chapters from leaking into the rewrite.
+            conn.execute("DELETE FROM characters WHERE project_id=?", (project_id,))
+            for character in base_characters:
+                conn.execute(
+                    """INSERT INTO characters
+                    (id,project_id,name,role,immutable_facts_json,current_state_json,version)
+                    VALUES (?,?,?,?,?,?,?)""",
+                    (
+                        character.id,
+                        project_id,
+                        character.name,
+                        character.role,
+                        self._dump(character.immutable_facts),
+                        self._dump(character.current_state),
+                        character.version,
+                    ),
+                )
+            for retained_number, updates in retained_updates:
+                self._apply_character_updates(conn, project_id, retained_number, updates)
+            new_current = max(0, chapter_number - 1)
+            conn.execute(
+                """UPDATE projects SET current_chapter=?,
+                status=CASE WHEN status=? THEN ? ELSE status END,
+                updated_at=? WHERE id=?""",
+                (
+                    new_current,
+                    ProjectStatus.HUMAN_REQUIRED.value,
+                    ProjectStatus.ACTIVE.value,
+                    now,
+                    project_id,
+                ),
+            )
+        return self.get_project(project_id)
 
     def create_chapter(self, chapter: ChapterRecord) -> ChapterRecord:
         with self.transaction() as conn:
             conn.execute(
                 """INSERT INTO chapters
-                (id,project_id,number,title,status,plan_json,content,summary,version,locked,created_at,updated_at)
+                (id,project_id,number,title,status,plan_json,content,summary,version,
+                 locked,created_at,updated_at)
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     chapter.id,
@@ -608,6 +808,30 @@ class SQLiteRepository:
             ).fetchall()
         return [self._chapter(row) for row in rows]
 
+    def list_chapter_versions(
+        self, project_id: str, chapter_number: int
+    ) -> list[dict[str, Any]]:
+        """Return immutable snapshots for one chapter, newest first."""
+        with self.connection() as conn:
+            rows = conn.execute(
+                """SELECT cv.version,cv.kind,cv.content,cv.metadata_json,cv.created_at
+                FROM chapter_versions cv
+                JOIN chapters c ON c.id=cv.chapter_id
+                WHERE c.project_id=? AND c.number=?
+                ORDER BY cv.version DESC""",
+                (project_id, chapter_number),
+            ).fetchall()
+        return [
+            {
+                "version": row["version"],
+                "kind": row["kind"],
+                "content": row["content"],
+                "metadata": json.loads(row["metadata_json"] or "{}"),
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+
     def update_chapter(
         self,
         chapter_id: str,
@@ -640,10 +864,14 @@ class SQLiteRepository:
 
     def save_draft_version(self, chapter_id: str, content: str, metadata: dict[str, Any]) -> int:
         with self.transaction() as conn:
-            row = conn.execute(
-                "SELECT COALESCE(MAX(version),0)+1 AS next_version FROM chapter_versions WHERE chapter_id=?",
-                (chapter_id,),
-            ).fetchone()
+            row = self._required_row(
+                conn.execute(
+                    """SELECT COALESCE(MAX(version),0)+1 AS next_version
+                    FROM chapter_versions WHERE chapter_id=?""",
+                    (chapter_id,),
+                ).fetchone(),
+                "计算章节草稿版本",
+            )
             version = int(row["next_version"])
             conn.execute(
                 """INSERT INTO chapter_versions
@@ -673,10 +901,14 @@ class SQLiteRepository:
                 raise RepositoryError(f"找不到章节：{chapter_id}")
             if chapter["status"] == ChapterStatus.READY.value:
                 return self._chapter(chapter)
-            row = conn.execute(
-                "SELECT COALESCE(MAX(version),0)+1 AS next_version FROM chapter_versions WHERE chapter_id=?",
-                (chapter_id,),
-            ).fetchone()
+            row = self._required_row(
+                conn.execute(
+                    """SELECT COALESCE(MAX(version),0)+1 AS next_version
+                    FROM chapter_versions WHERE chapter_id=?""",
+                    (chapter_id,),
+                ).fetchone(),
+                "计算章节正式版本",
+            )
             version = int(row["next_version"])
             now = utc_now()
             conn.execute(
@@ -687,16 +919,25 @@ class SQLiteRepository:
                     version,
                     "FINAL",
                     content,
-                    self._dump({"review": review, "run_id": run_id}),
+                    self._dump(
+                        {
+                            "review": review,
+                            "run_id": run_id,
+                            "timeline_event": timeline_event,
+                            "character_updates": character_updates,
+                        }
+                    ),
                     now,
                 ),
             )
             conn.execute(
-                """UPDATE chapters SET status=?,content=?,summary=?,version=?,updated_at=? WHERE id=?""",
+                """UPDATE chapters SET status=?,content=?,summary=?,version=?,updated_at=?
+                WHERE id=?""",
                 (ChapterStatus.READY.value, content, summary, version, now, chapter_id),
             )
             conn.execute(
-                """UPDATE projects SET current_chapter=MAX(current_chapter,?),updated_at=? WHERE id=?""",
+                """UPDATE projects SET current_chapter=MAX(current_chapter,?),updated_at=?
+                WHERE id=?""",
                 (chapter["number"], now, chapter["project_id"]),
             )
             conn.execute(
@@ -711,7 +952,8 @@ class SQLiteRepository:
                 character_updates,
             )
             conn.execute(
-                "INSERT INTO review_reports(chapter_id,run_id,report_json,created_at) VALUES (?,?,?,?)",
+                """INSERT INTO review_reports(chapter_id,run_id,report_json,created_at)
+                VALUES (?,?,?,?)""",
                 (chapter_id, run_id, self._dump(review), now),
             )
         return self.get_chapter(chapter_id)
@@ -725,6 +967,21 @@ class SQLiteRepository:
         with self.transaction() as conn:
             self._apply_character_updates(conn, project_id, chapter_number, updates)
         return self.list_characters(project_id)
+
+    @staticmethod
+    def _add_fact(facts: list[str], candidate: str) -> None:
+        text = str(candidate).strip()
+        if not text:
+            return
+        for existing in facts:
+            if text == existing:
+                return
+            if len(text) >= 8 and len(existing) >= 8:
+                shorter = text if len(text) <= len(existing) else existing
+                longer = existing if len(text) <= len(existing) else text
+                if shorter[:max(8, len(shorter)//2)] in longer:
+                    return
+        facts.append(text)
 
     def _apply_character_updates(
         self,
@@ -743,9 +1000,10 @@ class SQLiteRepository:
                 state = json.loads(row["current_state_json"])
                 facts = json.loads(row["immutable_facts_json"])
                 if character_update.profile:
-                    facts.append(f"人物背景：{character_update.profile}")
-                facts.extend(character_update.immutable_facts)
-                facts = list(dict.fromkeys(fact for fact in facts if str(fact).strip()))
+                    self._add_fact(facts, f"人物背景：{character_update.profile}")
+                for fact in character_update.immutable_facts:
+                    self._add_fact(facts, fact)
+                facts = [f for f in facts if str(f).strip()]
                 state["last_seen_chapter"] = max(
                     int(state.get("last_seen_chapter") or 0), chapter_number
                 )
@@ -784,14 +1042,11 @@ class SQLiteRepository:
                     ),
                 )
                 continue
-            facts = [
-                *(
-                    [f"人物背景：{character_update.profile}"]
-                    if character_update.profile
-                    else []
-                ),
-                *character_update.immutable_facts,
-            ]
+            facts: list[str] = []
+            if character_update.profile:
+                self._add_fact(facts, f"人物背景：{character_update.profile}")
+            for fact in character_update.immutable_facts:
+                self._add_fact(facts, fact)
             state = {
                 "chapter": chapter_number,
                 "importance": character_update.importance,
@@ -894,9 +1149,18 @@ class SQLiteRepository:
     ) -> None:
         with self.transaction() as conn:
             conn.execute(
-                """UPDATE runs SET status=?,checkpoint_json=?,error_code=?,updated_at=? WHERE id=?""",
+                """UPDATE runs SET status=?,checkpoint_json=?,error_code=?,updated_at=?
+                WHERE id=?""",
                 (status, self._dump(checkpoint or {}), error_code, utc_now(), run_id),
             )
+
+    def get_latest_run_id(self, project_id: str) -> str | None:
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT id FROM runs WHERE project_id=? ORDER BY created_at DESC LIMIT 1",
+                (project_id,),
+            ).fetchone()
+        return row["id"] if row else None
 
     def get_latest_run_diagnostic(self, project_id: str) -> dict[str, Any] | None:
         with self.connection() as conn:
@@ -1199,27 +1463,133 @@ class SQLiteRepository:
 
     def semantic_document_count(self, project_id: str) -> int:
         with self.connection() as conn:
-            row = conn.execute(
-                "SELECT COUNT(*) AS count FROM semantic_documents WHERE project_id=?",
-                (project_id,),
-            ).fetchone()
+            row = self._required_row(
+                conn.execute(
+                    "SELECT COUNT(*) AS count FROM semantic_documents WHERE project_id=?",
+                    (project_id,),
+                ).fetchone(),
+                "统计语义文档",
+            )
         return int(row["count"])
 
     def reserve_count(self, project_id: str) -> int:
         with self.connection() as conn:
-            row = conn.execute(
-                "SELECT COUNT(*) AS count FROM chapters WHERE project_id=? AND status=?",
-                (project_id, ChapterStatus.READY.value),
-            ).fetchone()
+            row = self._required_row(
+                conn.execute(
+                    "SELECT COUNT(*) AS count FROM chapters WHERE project_id=? AND status=?",
+                    (project_id, ChapterStatus.READY.value),
+                ).fetchone(),
+                "统计存稿章节",
+            )
         return int(row["count"])
 
     def save_setting(self, key: str, value: Any) -> None:
         with self.transaction() as conn:
             conn.execute(
                 """INSERT INTO settings(key,value_json,updated_at) VALUES (?,?,?)
-                ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at""",
+                ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,
+                updated_at=excluded.updated_at""",
                 (key, self._dump(value), utc_now()),
             )
+
+    def get_setting(self, key: str) -> Any:
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT value_json FROM settings WHERE key=?", (key,)
+            ).fetchone()
+        return json.loads(row["value_json"]) if row else None
+
+    def delete_setting(self, key: str) -> None:
+        with self.transaction() as conn:
+            conn.execute("DELETE FROM settings WHERE key=?", (key,))
+
+    def save_token_usage(
+        self,
+        date: str,
+        operation: str,
+        model: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+        total_tokens: int,
+        retry_count: int = 0,
+    ) -> None:
+        with self.transaction() as conn:
+            conn.execute(
+                """INSERT INTO token_usage
+                (date, operation, model, prompt_tokens, completion_tokens,
+                 total_tokens, retry_count, created_at)
+                VALUES (?,?,?,?,?,?,?,?)""",
+                (
+                    date,
+                    operation,
+                    model,
+                    prompt_tokens,
+                    completion_tokens,
+                    total_tokens,
+                    retry_count,
+                    utc_now(),
+                ),
+            )
+
+    def get_token_statistics(
+        self, start_date: str, end_date: str
+    ) -> dict[str, Any]:
+        with self.connection() as conn:
+            rows = conn.execute(
+                """SELECT date,
+                   SUM(prompt_tokens) AS prompt_tokens,
+                   SUM(completion_tokens) AS completion_tokens,
+                   SUM(total_tokens) AS total_tokens,
+                   COUNT(*) AS request_count,
+                   SUM(retry_count) AS retry_count
+                FROM token_usage
+                WHERE date >= ? AND date <= ?
+                GROUP BY date
+                ORDER BY date""",
+                (start_date, end_date),
+            ).fetchall()
+        dates: list[str] = []
+        total_tokens: list[int] = []
+        input_tokens: list[int] = []
+        output_tokens: list[int] = []
+        for row in rows:
+            dates.append(row["date"])
+            total_tokens.append(int(row["total_tokens"]))
+            input_tokens.append(int(row["prompt_tokens"]))
+            output_tokens.append(int(row["completion_tokens"]))
+        return {
+            "dates": dates,
+            "total_tokens": total_tokens,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+        }
+
+    def get_token_daily_summary(
+        self, start_date: str, end_date: str
+    ) -> dict[str, Any]:
+        with self.connection() as conn:
+            row = self._required_row(
+                conn.execute(
+                    """SELECT COUNT(DISTINCT date) AS days,
+                       SUM(total_tokens) AS total,
+                       SUM(prompt_tokens) AS prompt,
+                       SUM(completion_tokens) AS completion,
+                       COUNT(*) AS calls,
+                       SUM(retry_count) AS retries
+                    FROM token_usage
+                    WHERE date >= ? AND date <= ?""",
+                    (start_date, end_date),
+                ).fetchone(),
+                "汇总令牌用量",
+            )
+        return {
+            "total_tokens": int(row["total"] or 0),
+            "total_input": int(row["prompt"] or 0),
+            "total_output": int(row["completion"] or 0),
+            "total_calls": int(row["calls"] or 0),
+            "total_retries": int(row["retries"] or 0),
+            "days": int(row["days"] or 0),
+        }
 
     def list_settings(self) -> dict[str, Any]:
         with self.connection() as conn:
@@ -1246,7 +1616,11 @@ class SQLiteRepository:
             number=row["number"],
             title=row["title"],
             status=ChapterStatus(row["status"]),
-            plan=ChapterPlan.model_validate_json(row["plan_json"]) if row["plan_json"] else None,
+            plan=(
+                ChapterPlan.model_validate_json(row["plan_json"])
+                if row["plan_json"]
+                else None
+            ),
             content=row["content"],
             summary=row["summary"],
             version=row["version"],

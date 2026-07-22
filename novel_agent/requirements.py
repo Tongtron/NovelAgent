@@ -3,7 +3,7 @@ from __future__ import annotations
 from novel_agent.models import NovelCreateRequest
 from novel_agent.tags import TAG_CATALOG
 
-
+#校验器,检查是否存在冲突
 class RequirementConflict(ValueError):
     def __init__(self, conflicts: list[str]):
         self.conflicts = conflicts

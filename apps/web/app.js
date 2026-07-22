@@ -71,7 +71,7 @@ function wireNavigation() {
   $("#briefEditForm").addEventListener("submit", saveBriefEdit);
   $("#regenerateBriefButton").addEventListener("click", () => regenerateBrief({ feedback: "", sections: [] }));
   $("#feedbackRegenerateButton").addEventListener("click", regenerateBriefFromFeedback);
-  $("#deleteDraftButton").addEventListener("click", deleteDraft);
+  $("#deleteDraftButton").addEventListener("click", deleteProject);
   $("#briefVersionLeft").addEventListener("change", renderBriefComparison);
   $("#briefVersionRight").addEventListener("change", renderBriefComparison);
   $("#restoreBriefVersion").addEventListener("click", restoreBriefVersion);
@@ -119,6 +119,8 @@ async function loadSelected() {
   }
   state.detail = await api(`/api/novels/${state.selectedId}`);
   renderDetail();
+  const events = state.detail.latest_events || [];
+  if (events.length) renderPipeline(events);
   if (state.detail.project.status === "DRAFT") await loadBriefVersions();
 }
 
@@ -154,8 +156,14 @@ function renderDetail() {
   const editableDraft = project.status === "DRAFT" && !project.confirmed && chapters.length === 0;
   $("#editBriefButton").classList.toggle("hidden", !editableDraft);
   $("#regenerateBriefButton").classList.toggle("hidden", !editableDraft);
-  $("#deleteDraftButton").classList.toggle("hidden", !editableDraft);
   $("#briefWorkbench").classList.toggle("hidden", !editableDraft);
+  $("#deleteDraftButton").classList.remove("hidden");
+  const readyCount = chapters.filter((c) => ["READY", "SCHEDULED", "PUBLISHED"].includes(c.status)).length;
+  if (project.status === "DRAFT" && !project.confirmed && chapters.length === 0) {
+    $("#deleteDraftButton").textContent = "删除草稿";
+  } else {
+    $("#deleteDraftButton").textContent = "删除作品";
+  }
   $("#recoverButton").classList.toggle("hidden", project.status !== "HUMAN_REQUIRED");
   $("#pauseButton").classList.toggle("hidden", !project.confirmed);
   $("#pauseButton").textContent = project.status === "PAUSED" ? "继续" : "暂停";
@@ -170,7 +178,6 @@ function renderBrief(brief, request) {
     <div class="brief-block"><h4>频道与题材</h4><p><b>${escapeHtml(request.audience_channel || "男频")}</b><br>${escapeHtml(request.genre)} · ${request.experiences.map(escapeHtml).join(" / ") || "自动确定体验"}</p></div>
     <div class="brief-block"><h4>核心卖点</h4><ul>${brief.selling_points.map((x) => `<li>${escapeHtml(x)}</li>`).join("")}</ul></div>
     <div class="brief-block"><h4>主角与主要冲突</h4><p><b>${escapeHtml(brief.protagonist)}</b><br>${escapeHtml(brief.main_conflict)}</p></div>
-    <div class="brief-block"><h4>读者契约与核心期待</h4><p>${escapeHtml(brief.reader_contract || "等待方案生成")}</p><p><b>当前期待：</b>${escapeHtml(brief.core_expectation || "等待方案生成")}</p></div>
     <div class="brief-block"><h4>世界规则</h4><ul>${brief.world_rules.map((x) => `<li>${escapeHtml(x)}</li>`).join("")}</ul></div>
     <div class="brief-block"><h4>连载计划</h4><p>${escapeHtml(brief.update_plan)}<br>预计 ${brief.total_chapters} 章 / ${brief.volume_count} 卷</p></div>
   </div>`;
@@ -291,14 +298,39 @@ async function restoreBriefVersion() {
   } catch (error) { notify(error.message, true); } finally { busy(false); }
 }
 
-async function deleteDraft() {
-  if (!state.selectedId || !window.confirm("确定删除这个未确认的草稿项目吗？此操作不能撤销。")) return;
+async function deleteProject() {
+  if (!state.selectedId || !state.detail) return;
+  const { project, chapters } = state.detail;
+  const totalChapters = chapters.length;
+  const readyCount = chapters.filter((c) => ["READY", "SCHEDULED", "PUBLISHED"].includes(c.status)).length;
+  const editableDraft = project.status === "DRAFT" && !project.confirmed && totalChapters === 0;
+  let message;
+  if (editableDraft) {
+    message = "确定删除这个未确认的草稿项目吗？此操作不能撤销。";
+  } else if (totalChapters > 0) {
+    message = `确定删除作品「${project.title}」吗？\n\n该项目共有 ${totalChapters} 章（其中 ${readyCount} 章已完成），所有人物档案、时间线、世界规则和章节数据都将被永久删除。\n\n此操作不可撤销！`;
+  } else {
+    message = `确定删除作品「${project.title}」吗？此操作将永久删除该项目及所有关联数据，不可撤销。`;
+  }
+  if (editableDraft) {
+    if (!window.confirm(message)) return;
+  } else {
+    const entered = window.prompt(`${message}\n\n请输入完整书名“${project.title}”确认删除：`, "");
+    if (entered === null) return;
+    if (entered.trim() !== project.title) {
+      notify("书名不匹配，已取消删除。", true);
+      return;
+    }
+  }
   try {
     busy(true);
-    await api(`/api/novels/${state.selectedId}`, { method: "DELETE" });
+    await api(`/api/novels/${state.selectedId}`, {
+      method: "DELETE",
+      body: JSON.stringify({ confirmation_title: project.title }),
+    });
     state.selectedId = null;
     localStorage.removeItem("novelAgentProject");
-    notify("草稿项目已删除。");
+    notify("作品已删除。");
     await refresh();
   } catch (error) { notify(error.message, true); } finally { busy(false); }
 }
@@ -314,16 +346,74 @@ function renderChapters(chapters) {
   $("#readerTotal").textContent = `${chapters.length} 章`;
   $$(".chapter-row").forEach((row) => row.addEventListener("click", () => {
     const chapter = chapters.find((item) => item.id === row.dataset.chapterId);
-    showChapter(chapter);
+    void showChapterWithHistory(chapter);
   }));
+  $$(".chapter-rework-button").forEach((btn) => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      if (!state.selectedId) return;
+      const chapterNumber = parseInt(btn.dataset.chapterNumber, 10);
+      const feedback = window.prompt(
+        `打回第 ${chapterNumber} 章重做\n\n请输入修改意见（可选）：\n例如：主角对话太生硬，需要更自然；战斗场景太短，需要扩展。\n\n此操作将重置第 ${chapterNumber} 章及之后所有章节，不可撤销。`,
+        ""
+      );
+      if (feedback === null) return; // user cancelled
+      try {
+        busy(true);
+        await api(`/api/novels/${state.selectedId}/chapters/${chapterNumber}/rework`, {
+          method: "POST",
+          body: JSON.stringify({ feedback: feedback.trim() }),
+        });
+        notify(
+          feedback.trim()
+            ? `第 ${chapterNumber} 章已打回重做，修改意见已记录。`
+            : `第 ${chapterNumber} 章及后续章节已打回重做。`
+        );
+        await loadSelected();
+      } catch (error) { notify(error.message, true); } finally { busy(false); }
+    });
+  });
 }
 
 function chapterRow(chapter) {
   const statusClass = chapter.status === "READY" ? "status-ready" : chapter.status === "FAILED" ? "status-failed" : "";
-  return `<div class="chapter-row" data-chapter-id="${chapter.id}"><div><b>${escapeHtml(chapter.title)}</b><span>版本 ${chapter.version} · ${escapeHtml(chapter.summary || "等待生成")}</span></div><span class="${statusClass}">${chapter.status}</span></div>`;
+  const reworkable = chapter.status !== "PLANNED";
+  const reworkBtn = reworkable
+    ? `<button class="chapter-rework-button text-button" data-chapter-number="${chapter.number}" title="打回重做">↩ 重做</button>`
+    : "";
+  return `<div class="chapter-row" data-chapter-id="${chapter.id}"><div><b>${escapeHtml(chapter.title)}</b><span>版本 ${chapter.version} · ${escapeHtml(chapter.summary || "等待生成")}</span></div><div class="chapter-row-actions"><span class="${statusClass}">${chapter.status}</span>${reworkBtn}</div></div>`;
 }
 
-function showChapter(chapter) {
+function chapterText(content, title) {
+  const paragraphs = String(content || "").split(/\n\n+/).filter(Boolean);
+  if (paragraphs[0] === title) paragraphs.shift();
+  return paragraphs.map((paragraph) => `<p>${escapeHtml(paragraph)}</p>`).join("");
+}
+
+async function showChapterWithHistory(chapter) {
+  switchView("reader");
+  $$(".chapter-row").forEach((row) => row.classList.toggle("selected", row.dataset.chapterId === chapter.id));
+  const isReady = chapter.status === "READY";
+  const versionLabel = isReady ? "正式版本" : "草稿版本";
+  let history = "";
+  if (!isReady) {
+    try {
+      const payload = await api(`/api/novels/${state.selectedId}/chapters/${chapter.number}/versions`);
+      const older = (payload.items || []).filter((version) => version.version !== chapter.version);
+      if (older.length) {
+        history = `<details class="chapter-history"><summary>历史草稿（${older.length} 个，当前显示 v${chapter.version}）</summary>${older.map((version) => `<details><summary>草稿 v${version.version} · ${escapeHtml(version.created_at)}</summary>${chapterText(version.content, chapter.title)}</details>`).join("")}</details>`;
+      }
+    } catch (error) {
+      console.warn("chapter version history unavailable", error);
+    }
+  }
+  const body = chapter.content
+    ? chapterText(chapter.content, chapter.title)
+    : '<div class="empty">这个章节还没有可阅读的正文。</div>';
+  $("#readerContent").innerHTML = `<h2>${escapeHtml(chapter.title)}</h2><p class="reader-meta">${chapter.status} · ${versionLabel} v${chapter.version}</p>${history}${body}`;
+}
+
+function showChapterLegacy(chapter) {
   switchView("reader");
   $$(".chapter-row").forEach((row) => row.classList.toggle("selected", row.dataset.chapterId === chapter.id));
   if (!chapter.content) {
@@ -388,28 +478,43 @@ function characterFactParts(fact, characterName) {
 function renderCharacterCard(item) {
   const currentState = item.current_state || {};
   const progressChapter = Number(currentState.last_seen_chapter ?? currentState.chapter ?? 0);
-  const progressText = progressChapter > 0 ? `更新至第 ${progressChapter} 章` : "故事开始前";
+  const hasAppeared = progressChapter > 0;
+  const progressText = hasAppeared ? `更新至第 ${progressChapter} 章` : "尚未正式出场";
   const roleText = characterRoleLabels[item.role] || "人物";
   const importanceText = currentState.importance === "core" || item.role === "protagonist" ? "核心人物" : "重要人物";
-  const facts = (item.immutable_facts || []).map((fact) => characterFactParts(fact, item.name)).filter(Boolean);
-  const stateRows = Object.entries(currentState)
+  const maxFacts = item.role === "protagonist" ? 6 : 3;
+  const rawFacts = (item.immutable_facts || []).map((fact) => characterFactParts(fact, item.name)).filter(Boolean);
+  const facts = [];
+  for (const f of rawFacts) {
+    if (facts.length >= maxFacts) break;
+    if (f[0] === "固定设定" && facts.some((existing) => existing[1] === f[1])) continue;
+    facts.push(f);
+  }
+  const stateRows = hasAppeared ? Object.entries(currentState)
     .filter(([key]) => !["chapter", "last_seen_chapter", "importance"].includes(key))
+    .filter(([, value]) => {
+      if (value === null || value === undefined || value === "") return false;
+      if (Array.isArray(value) && value.length === 0) return false;
+      if (typeof value === "object" && Object.keys(value).length === 0) return false;
+      return true;
+    })
     .sort(([left], [right]) => {
       const leftIndex = characterStateOrder.indexOf(left);
       const rightIndex = characterStateOrder.indexOf(right);
       return (leftIndex < 0 ? characterStateOrder.length : leftIndex) - (rightIndex < 0 ? characterStateOrder.length : rightIndex);
-    });
+    }) : [];
   const factsHtml = facts.length
     ? facts.map(([label, value]) => `<div class="character-field"><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")
-    : '<p class="character-empty">暂无固定设定</p>';
+    : "";
   const stateHtml = stateRows.length
     ? stateRows.map(([key, value]) => `<div class="character-field"><dt>${escapeHtml(characterStateLabel(key))}</dt><dd>${escapeHtml(formatCharacterValue(value))}</dd></div>`).join("")
-    : '<p class="character-empty">暂无剧情进展</p>';
+    : "";
 
   return `<article class="character-card">
     <div class="character-head"><div><h4>${escapeHtml(item.name)}</h4><span>${escapeHtml(roleText)}</span><span class="importance-badge">${escapeHtml(importanceText)}</span></div><div class="character-progress">${escapeHtml(progressText)}<small>记忆版本 v${Number(item.version || 1)}</small></div></div>
-    <section class="character-section"><h5>人物档案</h5><dl>${factsHtml}</dl></section>
-    <section class="character-section"><h5>当前进展</h5><dl>${stateHtml}</dl></section>
+    ${factsHtml ? `<details class="character-section" open><summary><h5>人物档案</h5></summary><dl>${factsHtml}</dl></details>` : ""}
+    ${hasAppeared && stateHtml ? `<details class="character-section"><summary><h5>当前进展（${stateRows.length} 项）</h5></summary><dl>${stateHtml}</dl></details>` : ""}
+    ${!hasAppeared ? `<p class="character-empty">尚未在正文中正式出场，档案数据来自创作方案。</p>` : ""}
   </article>`;
 }
 
@@ -468,10 +573,50 @@ function showCharacterList() {
 
 function renderMemory(characters, facts, timeline, researchSources, semanticCount) {
   renderCharacterArchive(characters);
-  $("#worldContent").innerHTML = facts.length ? facts.map((item) => `<div class="fact-card"><h4>${escapeHtml(item.category)} ${item.locked ? "🔒" : ""}</h4><p>${escapeHtml(item.statement)}</p></div>`).join("") : '<div class="empty">暂无规则</div>';
-  $("#timelineContent").innerHTML = timeline.length ? timeline.map((item) => `<div class="timeline-item"><b>第 ${item.chapter_number} 章</b><p>${escapeHtml(item.event)}</p></div>`).join("") : '<div class="empty">暂无正式事件</div>';
+  const categoryGroups = {};
+  facts.forEach((f) => { (categoryGroups[f.category] ||= []).push(f); });
+  const factHtml = Object.entries(categoryGroups).map(([cat, items]) => {
+    const body = items.map((f) => `<p>${escapeHtml(f.statement)} ${f.locked ? "🔒" : ""}</p>`).join("");
+    return `<details class="fact-group"><summary>${escapeHtml(cat)} (${items.length})</summary><div class="fact-group-body">${body}</div></details>`;
+  }).join("");
+  $("#worldContent").innerHTML = facts.length ? factHtml : '<div class="empty">暂无规则</div>';
+  const maxTimeline = 15;
+  const visibleTimeline = timeline.slice(-maxTimeline);
+  const hiddenCount = timeline.length - maxTimeline;
+  const timelineHtml = visibleTimeline.map((item) => `<div class="timeline-item"><b>第 ${item.chapter_number} 章</b><p>${escapeHtml(item.event)}</p></div>`).join("");
+  const expandHtml = hiddenCount > 0
+    ? `<button class="text-button" id="expandTimeline" style="margin-top:8px;font-size:11px">展开全部 ${timeline.length} 条</button>
+       <div id="hiddenTimeline" class="hidden">${timeline.slice(0, -maxTimeline).map((item) => `<div class="timeline-item"><b>第 ${item.chapter_number} 章</b><p>${escapeHtml(item.event)}</p></div>`).join("")}</div>`
+    : "";
+  $("#timelineContent").innerHTML = timeline.length
+    ? timelineHtml + expandHtml
+    : '<div class="empty">暂无正式事件</div>';
+  if (hiddenCount > 0) {
+    $("#expandTimeline").addEventListener("click", () => {
+      $("#hiddenTimeline").classList.toggle("hidden");
+      $("#expandTimeline").textContent = $("#hiddenTimeline").classList.contains("hidden")
+        ? `展开全部 ${timeline.length} 条` : "收起";
+    });
+  }
   $("#semanticCount").textContent = `${semanticCount} 条语义索引`;
-  $("#researchContent").innerHTML = researchSources.length ? researchSources.slice(0, 20).map((item) => `<div class="research-card"><div><b>${escapeHtml(item.title || item.domain || "网页来源")}</b><span>${item.verified ? "已获得交叉来源" : "单一来源"} · 可信度 ${Number(item.reliability || 0).toFixed(2)}</span></div><p>${escapeHtml(item.excerpt || "")}</p>${item.url ? `<a href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer">打开来源 ↗</a>` : ""}</div>`).join("") : '<div class="empty">尚未触发现实知识调研</div>';
+  const maxResearch = 5;
+  const visibleResearch = researchSources.slice(0, maxResearch);
+  const hiddenResearch = researchSources.length - maxResearch;
+  const researchHtml = visibleResearch.map((item) => `<div class="research-card"><div><b>${escapeHtml(item.title || item.domain || "网页来源")}</b><span>${item.verified ? "已获得交叉来源" : "单一来源"} · 可信度 ${Number(item.reliability || 0).toFixed(2)}</span></div><p>${escapeHtml(item.excerpt || "")}</p>${item.url ? `<a href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer">打开来源 ↗</a>` : ""}</div>`).join("");
+  const researchExpand = hiddenResearch > 0
+    ? `<button class="text-button" id="expandResearch" style="margin-top:8px;font-size:11px">展开全部 ${researchSources.length} 条</button>
+       <div id="hiddenResearch" class="hidden">${researchSources.slice(maxResearch).map((item) => `<div class="research-card"><div><b>${escapeHtml(item.title || item.domain || "网页来源")}</b><span>${item.verified ? "已获得交叉来源" : "单一来源"} · 可信度 ${Number(item.reliability || 0).toFixed(2)}</span></div><p>${escapeHtml(item.excerpt || "")}</p>${item.url ? `<a href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer">打开来源 ↗</a>` : ""}</div>`).join("")}</div>`
+    : "";
+  $("#researchContent").innerHTML = researchSources.length
+    ? researchHtml + researchExpand
+    : '<div class="empty">尚未触发现实知识调研</div>';
+  if (hiddenResearch > 0) {
+    $("#expandResearch").addEventListener("click", () => {
+      $("#hiddenResearch").classList.toggle("hidden");
+      $("#expandResearch").textContent = $("#hiddenResearch").classList.contains("hidden")
+        ? `展开全部 ${researchSources.length} 条` : "收起";
+    });
+  }
 }
 
 async function rebuildCharacterArchives() {
@@ -559,22 +704,208 @@ async function generateChapter() {
     const payload = await api(`/api/novels/${state.selectedId}/runs`, { method: "POST", body: JSON.stringify({ count: 1 }) });
     const result = payload.items[0];
     renderPipeline(result.events);
-    notify(`${result.chapter.title} 已通过审核并进入 READY 储备。`);
+    if (result.chapter.status === "READY") {
+      notify(`${result.chapter.title} 已通过审核并进入 READY 储备。`);
+    } else {
+      notify(`${result.chapter.title} 暂未通过质量门槛，已保留草稿；可再次生成进行定向重写。`, true);
+    }
     await refresh();
   } catch (error) { notify(error.message, true); } finally { busy(false); }
 }
 
 async function loadSettings() {
   try {
-    const payload = await api("/api/settings");
-    $("#apiStatusCards").innerHTML = Object.entries(payload.runtime).map(([name, item]) => `<div class="api-card"><div><b>${escapeHtml(name.toUpperCase())}</b><span>provider: ${escapeHtml(item.provider)}</span></div><div class="api-state">${item.enabled ? "已启用" : item.configured ? "已配置 / 未启用" : "待配置"}</div></div>`).join("");
+    const [settings, usage] = await Promise.all([
+      api("/api/settings"),
+      api("/api/usage").catch(() => null),
+    ]);
+    renderUsage(usage);
     const form = $("#settingsForm");
-    for (const [key, value] of Object.entries(payload.preferences)) {
+    for (const [key, value] of Object.entries(settings.preferences)) {
       const input = form.elements[key];
       if (!input) continue;
       if (input.type === "checkbox") input.checked = Boolean(value); else input.value = value;
     }
   } catch (error) { notify(error.message, true); }
+}
+
+const usagePeriodState = {
+  mode: "7",
+  year: new Date().getFullYear(),
+  month: new Date().getMonth(),
+  pickerYear: new Date().getFullYear(),
+};
+let usageRequestId = 0;
+
+function formatLocalDate(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function selectedUsagePeriod() {
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  let start = new Date(today);
+  let end = new Date(today);
+  let label = "最近 7 天";
+
+  if (usagePeriodState.mode === "30") {
+    start.setDate(start.getDate() - 29);
+    label = "最近 30 天";
+  } else if (usagePeriodState.mode === "month") {
+    start = new Date(today.getFullYear(), today.getMonth(), 1);
+    label = "本月";
+  } else if (usagePeriodState.mode === "custom") {
+    start = new Date(usagePeriodState.year, usagePeriodState.month, 1);
+    end = new Date(usagePeriodState.year, usagePeriodState.month + 1, 0);
+    if (usagePeriodState.year === today.getFullYear() && usagePeriodState.month === today.getMonth()) {
+      end = today;
+    }
+    label = `${usagePeriodState.year}年${usagePeriodState.month + 1}月`;
+  } else {
+    start.setDate(start.getDate() - 6);
+  }
+
+  return { startDate: formatLocalDate(start), endDate: formatLocalDate(end), label };
+}
+
+function syncUsagePeriodControls() {
+  const { label } = selectedUsagePeriod();
+  $("#usagePeriodLabel").textContent = label;
+  $$('[data-usage-range]').forEach((button) => {
+    const active = button.dataset.usageRange === usagePeriodState.mode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  renderUsageMonthGrid();
+}
+
+function renderUsageMonthGrid() {
+  const grid = $("#usageMonthGrid");
+  if (!grid) return;
+  const now = new Date();
+  const months = ["一月", "二月", "三月", "四月", "五月", "六月", "七月", "八月", "九月", "十月", "十一月", "十二月"];
+  grid.innerHTML = months.map((name, month) => {
+    const future = usagePeriodState.pickerYear > now.getFullYear()
+      || (usagePeriodState.pickerYear === now.getFullYear() && month > now.getMonth());
+    const active = usagePeriodState.mode === "custom"
+      && usagePeriodState.year === usagePeriodState.pickerYear
+      && usagePeriodState.month === month;
+    return `<button type="button" data-usage-month="${month}"${future ? " disabled" : ""} class="${active ? "active" : ""}" aria-pressed="${active}">${name}</button>`;
+  }).join("");
+  $$('[data-usage-month]').forEach((button) => button.addEventListener("click", () => {
+    usagePeriodState.mode = "custom";
+    usagePeriodState.year = usagePeriodState.pickerYear;
+    usagePeriodState.month = Number(button.dataset.usageMonth);
+    syncUsagePeriodControls();
+    closeUsagePeriodPicker();
+    void renderUsage();
+  }));
+}
+
+function closeUsagePeriodPicker() {
+  $("#usagePeriodPopover")?.classList.add("hidden");
+  $("#usagePeriodButton")?.setAttribute("aria-expanded", "false");
+}
+
+function initializeUsagePeriodPicker() {
+  const yearSelect = $("#usageYearSelect");
+  if (!yearSelect) return;
+  const currentYear = new Date().getFullYear();
+  yearSelect.innerHTML = Array.from({ length: currentYear - 1999 }, (_, index) => currentYear - index)
+    .map((year) => `<option value="${year}">${year} 年</option>`)
+    .join("");
+  yearSelect.value = String(usagePeriodState.pickerYear);
+  yearSelect.addEventListener("change", () => {
+    usagePeriodState.pickerYear = Number(yearSelect.value);
+    renderUsageMonthGrid();
+  });
+
+  $("#usagePeriodButton").addEventListener("click", () => {
+    const popover = $("#usagePeriodPopover");
+    const willOpen = popover.classList.contains("hidden");
+    popover.classList.toggle("hidden", !willOpen);
+    $("#usagePeriodButton").setAttribute("aria-expanded", String(willOpen));
+    if (willOpen) syncUsagePeriodControls();
+  });
+  $$('[data-usage-range]').forEach((button) => button.addEventListener("click", () => {
+    usagePeriodState.mode = button.dataset.usageRange;
+    syncUsagePeriodControls();
+    closeUsagePeriodPicker();
+    void renderUsage();
+  }));
+  document.addEventListener("click", (event) => {
+    if (!$("#usagePeriod")?.contains(event.target)) closeUsagePeriodPicker();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeUsagePeriodPicker();
+  });
+  syncUsagePeriodControls();
+}
+
+function formatTokens(value) {
+  const tokens = Number(value || 0);
+  if (tokens >= 1000000) return `${(tokens / 1000000).toFixed(1)}m`;
+  if (tokens >= 1000) return `${(tokens / 1000).toFixed(1)}k`;
+  return String(tokens);
+}
+
+async function renderUsage() {
+  const requestId = ++usageRequestId;
+  const { startDate, endDate, label } = selectedUsagePeriod();
+  const panel = $("#usagePanel");
+  const chart = $("#usageChart");
+  syncUsagePeriodControls();
+  panel?.classList.add("is-loading");
+  panel?.setAttribute("aria-busy", "true");
+  $("#usageModel").textContent = `${label} · 正在读取…`;
+
+  let stats;
+  try {
+    const query = new URLSearchParams({ start_date: startDate, end_date: endDate });
+    stats = await api(`/api/token/statistics?${query}`);
+  } catch {
+    if (requestId !== usageRequestId) return;
+    $("#usageModel").textContent = `${label} · 数据读取失败`;
+    chart.innerHTML = '<div class="usage-empty"><strong>暂时无法读取 Token 数据</strong><span>请确认服务正常运行后重试。</span></div>';
+    $("#usageSummary").innerHTML = "";
+    return;
+  } finally {
+    if (requestId === usageRequestId) {
+      panel?.classList.remove("is-loading");
+      panel?.setAttribute("aria-busy", "false");
+    }
+  }
+
+  if (requestId !== usageRequestId) return;
+  if (!stats.dates || !stats.dates.length) {
+    $("#usageModel").textContent = `${label} · ${startDate} 至 ${endDate}`;
+    chart.innerHTML = '<div class="usage-empty"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3v3M17 3v3M4 9h16M5 5h14a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1Z"/></svg><strong>所选周期暂无记录</strong><span>产生新的模型调用后，用量会自动显示在这里。</span></div>';
+    $("#usageSummary").innerHTML = "";
+    return;
+  }
+
+  $("#usageModel").textContent = `${label} · ${startDate} 至 ${endDate}`;
+  $("#usageSummary").innerHTML = `
+    <div class="usage-card"><span>今日消耗</span><strong>${formatTokens(stats.today_tokens)}</strong></div>
+    <div class="usage-card"><span>周期总量</span><strong>${formatTokens(stats.period_tokens)}</strong></div>
+    <div class="usage-card"><span>日均消耗</span><strong>${formatTokens(stats.avg_daily)}</strong></div>
+    <div class="usage-card"><span>消耗峰值日</span><strong>${escapeHtml((stats.max_date || "").slice(5) || "--")}</strong></div>`;
+
+  const maxTokens = Math.max(...stats.total_tokens.map(Number), 1);
+  chart.innerHTML = `<div class="usage-bars" style="--usage-columns:${stats.dates.length}">${stats.dates.map((date, index) => {
+    const total = Number(stats.total_tokens[index] || 0);
+    const input = Number(stats.input_tokens[index] || 0);
+    const output = Number(stats.output_tokens[index] || 0);
+    const height = Math.max(3, Math.round((total / maxTokens) * 100));
+    const inputShare = total ? Math.max(0, Math.min(100, (input / total) * 100)) : 0;
+    const outputShare = total ? Math.max(0, Math.min(100 - inputShare, (output / total) * 100)) : 0;
+    const title = `${date}｜总计 ${formatTokens(total)}｜输入 ${formatTokens(input)}｜输出 ${formatTokens(output)}`;
+    const showValue = stats.dates.length <= 14 || index % 3 === 0 || index === stats.dates.length - 1;
+    return `<div class="usage-bar-column" title="${escapeHtml(title)}"><div class="usage-bar-value">${showValue ? formatTokens(total) : ""}</div><div class="usage-bar-stack" style="height:${height}%"><span class="usage-bar-output" style="height:${outputShare}%"></span><span class="usage-bar-input" style="height:${inputShare}%"></span></div><span>${escapeHtml(date.slice(5))}</span></div>`;
+  }).join("")}</div>`;
 }
 
 async function saveSettings(event) {
@@ -586,4 +917,5 @@ async function saveSettings(event) {
 
 function statusLabel(status) { return ({DRAFT:"等待方案确认",ACTIVE:"自动连载可用",PAUSED:"已暂停",HUMAN_REQUIRED:"需要人工处理",ARCHIVED:"已归档"})[status] || status; }
 
+initializeUsagePeriodPicker();
 boot();

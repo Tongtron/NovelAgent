@@ -41,6 +41,7 @@ class Settings:
     llm_model: str | None
     llm_timeout_seconds: float
     llm_max_retries: int
+    llm_reasoning_budget_factor: float
     search_provider: str
     search_api_key: str | None
     search_base_url: str | None
@@ -58,6 +59,12 @@ class Settings:
     story_skills_enabled: bool
     oh_story_enabled: bool
     max_revision_attempts: int = 2
+    memory_budget_tokens: int = 6000
+    memory_character_gap: int = 10
+    memory_world_fact_gap: int = 20
+    memory_timeline_gap: int = 15
+    memory_research_gap: int = 5
+    memory_research_reliability: float = 0.5
 
     @classmethod
     def load(cls, root: Path | None = None) -> "Settings":
@@ -97,6 +104,13 @@ class Settings:
             llm_model=llm_model,
             llm_timeout_seconds=float(os.getenv("LLM_TIMEOUT_SECONDS", "120")),
             llm_max_retries=int(os.getenv("LLM_MAX_RETRIES", "2")),
+            llm_reasoning_budget_factor=max(
+                1.0,
+                min(
+                    4.0,
+                    float(os.getenv("LLM_REASONING_BUDGET_FACTOR", "3.0")),
+                ),
+            ),
             search_provider=search_provider,
             search_api_key=os.getenv("SEARCH_API_KEY") or None,
             search_base_url=search_base_url,
@@ -116,6 +130,28 @@ class Settings:
             story_skills_enabled=_env_bool("STORY_SKILLS_ENABLED", True),
             oh_story_enabled=_env_bool("OH_STORY_ENABLED", True),
             max_revision_attempts=int(os.getenv("MAX_REVISION_ATTEMPTS", "2")),
+            memory_budget_tokens=max(
+                1000, int(os.getenv("MEMORY_BUDGET_TOKENS", "6000"))
+            ),
+            memory_character_gap=max(
+                1, int(os.getenv("MEMORY_CHARACTER_GAP", "10"))
+            ),
+            memory_world_fact_gap=max(
+                1, int(os.getenv("MEMORY_WORLD_FACT_GAP", "20"))
+            ),
+            memory_timeline_gap=max(
+                1, int(os.getenv("MEMORY_TIMELINE_GAP", "15"))
+            ),
+            memory_research_gap=max(
+                1, int(os.getenv("MEMORY_RESEARCH_GAP", "5"))
+            ),
+            memory_research_reliability=max(
+                0.0,
+                min(
+                    1.0,
+                    float(os.getenv("MEMORY_RESEARCH_RELIABILITY", "0.5")),
+                ),
+            ),
         )
 
     def api_readiness(self) -> dict[str, dict[str, object]]:

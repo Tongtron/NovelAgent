@@ -15,9 +15,11 @@ from novel_agent.adapters_remote import (
 from novel_agent.config import Settings
 from novel_agent.models import (
     ChapterPlan,
+    ChapterPlanBatch,
     ContinuityContext,
     CreativeBrief,
     NovelCreateRequest,
+    ReadabilityContext,
     ReviewDecision,
 )
 from novel_agent.repository import SQLiteRepository
@@ -66,6 +68,52 @@ def plan_payload(number: int = 1) -> dict:
         "scenes": ["进入仓库", "分组清点", "发现异常"],
         "research_questions": [],
     }
+
+
+def plan_candidates_payload(number: int = 1) -> dict:
+    candidates = []
+    for index in range(3):
+        item = plan_payload(number)
+        item["title"] = f"第{number}章 候选{index + 1}"
+        item["conflict"] = f"候选{index + 1}的具体冲突"
+        item["turning_point"] = f"候选{index + 1}的转折"
+        item["critical_choice"] = f"候选{index + 1}的不可兼得选择"
+        candidates.append(item)
+    return {"candidates": candidates}
+
+
+def selection_payload(selected_index: int = 1) -> dict:
+    return {
+        "selected_index": selected_index,
+        "rationale": "候选二具有最明确的代价和不可逆结果。",
+        "evaluations": [
+            {
+                "index": index,
+                "causality": 80 + index,
+                "conflict_pressure": 82 + index,
+                "character_choice": 84 + index,
+                "novelty": 78 + index,
+                "continuity": 86 + index,
+                "payoff": 83 + index,
+                "weaknesses": [],
+            }
+            for index in range(3)
+        ],
+    }
+
+
+def readability_payload() -> dict:
+    checks = {
+        "opening_hook": 90,
+        "scene_causality": 88,
+        "conflict_escalation": 87,
+        "character_agency": 89,
+        "dialogue_voice": 84,
+        "showing_specificity": 86,
+        "reader_payoff": 88,
+        "ending_hook": 90,
+    }
+    return {"decision": "PASS", "score": 88, "issues": [], "checks": checks}
 
 
 class RecordingTransport:
@@ -128,6 +176,43 @@ class DeepSeekGatewayTests(unittest.TestCase):
         self.assertIsInstance(plan, ChapterPlan)
         self.assertEqual(plan.number, 3)
 
+    def test_three_plan_generation_and_independent_selection(self) -> None:
+        transport = RecordingTransport(
+            [
+                completion(json.dumps(plan_candidates_payload(2), ensure_ascii=False)),
+                completion(json.dumps(selection_payload(), ensure_ascii=False)),
+            ]
+        )
+        gateway = self.gateway(transport)
+        batch = gateway.plan_chapter_candidates(
+            self.request(),
+            CreativeBrief.model_validate(brief_payload()),
+            2,
+            ["上一章摘要"],
+            ["未解线索"],
+            previous_chapter_excerpt="上一章结尾正在敲门。",
+        )
+        selection = gateway.select_chapter_plan(
+            batch.candidates,
+            "上一章结尾正在敲门。",
+        )
+
+        self.assertIsInstance(batch, ChapterPlanBatch)
+        self.assertEqual(len(batch.candidates), 3)
+        self.assertEqual(selection.selected_index, 1)
+        self.assertIn(
+            "上一章结尾正在敲门",
+            transport.calls[0][2]["messages"][1]["content"],
+        )
+        self.assertIn(
+            "不可兼得",
+            transport.calls[1][2]["messages"][1]["content"],
+        )
+        self.assertNotIn(
+            "character_updates",
+            transport.calls[1][2]["messages"][1]["content"],
+        )
+
     def test_revise_brief_sends_feedback_and_selected_fields(self) -> None:
         revised_payload = brief_payload()
         revised_payload["selected_title"] = "新方案标题"
@@ -147,8 +232,13 @@ class DeepSeekGatewayTests(unittest.TestCase):
         prompt = transport.calls[0][2]["messages"][1]["content"]
         self.assertIn("书名更简洁", prompt)
         self.assertIn("selected_title", prompt)
+        self.assertIn("必须返回包含 Schema 全部字段的完整 JSON", prompt)
         self.assertEqual(
             transport.calls[0][2]["response_format"], {"type": "json_object"}
+        )
+        self.assertIn(
+            "JSON 输出示例",
+            transport.calls[0][2]["messages"][0]["content"],
         )
 
     def test_writer_and_revision_return_plain_text(self) -> None:
@@ -159,11 +249,22 @@ class DeepSeekGatewayTests(unittest.TestCase):
         request = self.request()
         brief = CreativeBrief.model_validate(brief_payload())
         plan = ChapterPlan.model_validate(plan_payload())
-        content = gateway.write_chapter(request, brief, plan, "林川", [])
+        content = gateway.write_chapter(
+            request,
+            brief,
+            plan,
+            "林川",
+            [],
+            previous_chapter_excerpt="地下库门后的敲击突然停了。",
+        )
         revised = gateway.revise_chapter(content, ["增加行动细节"], 1200)
         self.assertIn("正文内容", content)
         self.assertIn("修订后的正文", revised)
         self.assertNotIn("response_format", transport.calls[0][2])
+        self.assertIn(
+            "地下库门后的敲击突然停了",
+            transport.calls[0][2]["messages"][1]["content"],
+        )
 
     def test_deslop_uses_pinned_skill_as_a_bounded_language_edit(self) -> None:
         transport = RecordingTransport([completion("第1章 清点\n\n林川把清单压在桌上。")])
@@ -240,6 +341,52 @@ class DeepSeekGatewayTests(unittest.TestCase):
         self.assertIn("approved_skill", payload["messages"][0]["content"])
         self.assertIn("deterministic_findings", payload["messages"][1]["content"])
 
+    def test_readability_review_enforces_dimension_scores(self) -> None:
+        transport = RecordingTransport(
+            [completion(json.dumps(readability_payload(), ensure_ascii=False))]
+        )
+        gateway = self.gateway(transport)
+        report = gateway.review_readability(
+            ReadabilityContext(
+                project_id="novel_test",
+                chapter_number=2,
+                creative_request=self.request().model_dump(mode="json"),
+                creative_brief=brief_payload(),
+                chapter_plan=plan_payload(2),
+                current_draft="第2章 门外\n\n门外的敲击还在继续。",
+                previous_chapter_excerpt="有人在地下库敲门。",
+            )
+        )
+
+        self.assertEqual(report.decision, ReviewDecision.PASS)
+        self.assertEqual(set(report.checks), set(readability_payload()["checks"]))
+        prompt = transport.calls[0][2]["messages"][1]["content"]
+        self.assertIn("scene_causality", prompt)
+        self.assertIn("不得因为篇幅足够", prompt)
+
+    def test_readability_review_synthesizes_actionable_issue_for_low_dimension(self) -> None:
+        payload = readability_payload()
+        payload["checks"]["character_agency"] = 60
+        transport = RecordingTransport(
+            [completion(json.dumps(payload, ensure_ascii=False))]
+        )
+        report = self.gateway(transport).review_readability(
+            ReadabilityContext(
+                project_id="novel_test",
+                chapter_number=1,
+                creative_request=self.request().model_dump(mode="json"),
+                creative_brief=brief_payload(),
+                chapter_plan=plan_payload(),
+                current_draft="主角等别人替他解决问题。",
+            )
+        )
+
+        self.assertEqual(report.decision, ReviewDecision.REVISE)
+        self.assertIn(
+            "readability_character_agency",
+            {issue.category for issue in report.issues},
+        )
+
     def test_empty_json_response_is_retried_once(self) -> None:
         transport = RecordingTransport(
             [completion(""), completion(json.dumps(brief_payload(), ensure_ascii=False))]
@@ -251,9 +398,45 @@ class DeepSeekGatewayTests(unittest.TestCase):
         self.assertIn("上一次响应为空", retry_prompt)
 
     def test_invalid_json_is_classified(self) -> None:
-        gateway = self.gateway(RecordingTransport([completion("not json")]))
+        gateway = self.gateway(
+            RecordingTransport([completion("not json"), completion("still not json")])
+        )
         with self.assertRaises(LLMResponseError):
             gateway.create_brief(self.request())
+
+    def test_invalid_json_is_repaired_once(self) -> None:
+        transport = RecordingTransport(
+            [
+                completion("not json"),
+                completion(json.dumps(brief_payload(), ensure_ascii=False)),
+            ]
+        )
+
+        brief = self.gateway(transport).create_brief(self.request())
+
+        self.assertEqual(brief.selected_title, "余烬仓城")
+        self.assertEqual(len(transport.calls), 2)
+        self.assertIn(
+            "上一次输出无法解析或缺少必填字段",
+            transport.calls[1][2]["messages"][1]["content"],
+        )
+
+    def test_missing_structured_fields_are_repaired_once(self) -> None:
+        transport = RecordingTransport(
+            [
+                completion('{"selected_title":"字段不完整"}'),
+                completion(json.dumps(brief_payload(), ensure_ascii=False)),
+            ]
+        )
+
+        brief = self.gateway(transport).create_brief(self.request())
+
+        self.assertEqual(brief.selected_title, "余烬仓城")
+        self.assertEqual(len(transport.calls), 2)
+        self.assertIn(
+            "title_candidates",
+            transport.calls[1][2]["messages"][1]["content"],
+        )
 
     def test_authentication_failure_is_not_retried(self) -> None:
         error = urllib.error.HTTPError("url", 401, "unauthorized", None, None)
@@ -268,6 +451,26 @@ class DeepSeekGatewayTests(unittest.TestCase):
                 [],
             )
         self.assertEqual(len(transport.calls), 1)
+
+    def test_retry_count_is_recorded_with_usage(self) -> None:
+        error = urllib.error.HTTPError("url", 500, "temporary", None, None)
+        transport = RecordingTransport([error, completion("完整正文")])
+        gateway = self.gateway(transport)
+        saved: list[dict] = []
+        gateway._on_usage = lambda **payload: saved.append(payload)
+
+        result = gateway.write_chapter(
+            self.request(),
+            CreativeBrief.model_validate(brief_payload()),
+            ChapterPlan.model_validate(plan_payload()),
+            "林川",
+            [],
+        )
+
+        self.assertEqual(result, "完整正文")
+        self.assertEqual(len(transport.calls), 2)
+        self.assertEqual(gateway.operation_log[-1]["retry_count"], 1)
+        self.assertEqual(saved[-1]["retry_count"], 1)
 
     def test_truncated_output_is_rejected(self) -> None:
         gateway = self.gateway(RecordingTransport([completion("partial", finish_reason="length")]))
@@ -334,6 +537,7 @@ class DeepSeekGatewayTests(unittest.TestCase):
                 completion(json.dumps(brief_payload(), ensure_ascii=False)),
                 completion(json.dumps(plan_payload(), ensure_ascii=False)),
                 completion(chapter_text),
+                completion(json.dumps(readability_payload(), ensure_ascii=False)),
                 completion(json.dumps(character_memory, ensure_ascii=False)),
             ]
         )
@@ -349,7 +553,15 @@ class DeepSeekGatewayTests(unittest.TestCase):
             characters = repository.list_characters(project.id)
         self.assertEqual(result.chapter.status.value, "READY")
         self.assertEqual(result.review.decision.value, "PASS")
-        self.assertEqual(len(transport.calls), 4)
+        self.assertEqual(len(transport.calls), 5)
+        self.assertEqual(
+            [call[2]["thinking"]["type"] for call in transport.calls],
+            ["enabled", "enabled", "disabled", "disabled", "disabled"],
+        )
+        self.assertEqual(
+            [call[2]["max_tokens"] for call in transport.calls],
+            [18000, 10500, 4000, 3200, 4000],
+        )
         self.assertIn("周宁", [item.name for item in characters])
         zhou_ning = next(item for item in characters if item.name == "周宁")
         self.assertEqual(zhou_ning.role, "ally")

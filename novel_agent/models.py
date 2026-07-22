@@ -59,7 +59,7 @@ class ReviewDecision(StrEnum):
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-
+#小说创建请求
 class NovelCreateRequest(StrictModel):
     preferred_title: str | None = Field(default=None, max_length=80)
     audience_channel: str = "男频"
@@ -116,7 +116,7 @@ class BriefRegenerateRequest(StrictModel):
             raise ValueError(f"不支持的方案模块：{'、'.join(invalid)}")
         return list(dict.fromkeys(value))
 
-
+#小说记忆更新
 class CharacterProfile(StrictModel):
     name: str = Field(min_length=1, max_length=20)
     role: str = Field(default="supporting", max_length=30)
@@ -131,7 +131,7 @@ class CharacterProfile(StrictModel):
     def strip_character_text(cls, value: Any) -> Any:
         return value.strip() if isinstance(value, str) else value
 
-
+#角色档案
 class CreativeBrief(StrictModel):
     title_candidates: list[str]
     selected_title: str
@@ -199,7 +199,7 @@ class CreativeBrief(StrictModel):
         self.character_profiles = profiles
         return self
 
-
+#角色记忆更新
 class CharacterMemoryUpdate(StrictModel):
     name: str = Field(min_length=1, max_length=20)
     role: str = Field(default="supporting", max_length=30)
@@ -230,7 +230,7 @@ class SceneBeat(StrictModel):
     intensity: Literal["dense", "normal", "sparse"] = "normal"
     target_chars: int = Field(ge=40, le=3000)
 
-
+#章节规划
 class ChapterPlan(StrictModel):
     number: int
     title: str
@@ -257,6 +257,29 @@ class ChapterPlan(StrictModel):
     scene_beats: list[SceneBeat] = Field(default_factory=list, max_length=20)
 
 
+class ChapterPlanBatch(StrictModel):
+    """Exactly three materially different plans for the same chapter."""
+
+    candidates: list[ChapterPlan] = Field(min_length=3, max_length=3)
+
+
+class PlanCandidateEvaluation(StrictModel):
+    index: int = Field(ge=0, le=2)
+    causality: float = Field(ge=0, le=100)
+    conflict_pressure: float = Field(ge=0, le=100)
+    character_choice: float = Field(ge=0, le=100)
+    novelty: float = Field(ge=0, le=100)
+    continuity: float = Field(ge=0, le=100)
+    payoff: float = Field(ge=0, le=100)
+    weaknesses: list[str] = Field(default_factory=list, max_length=6)
+
+
+class ChapterPlanSelection(StrictModel):
+    selected_index: int = Field(ge=0, le=2)
+    rationale: str = Field(min_length=1, max_length=1200)
+    evaluations: list[PlanCandidateEvaluation] = Field(min_length=3, max_length=3)
+
+
 class ProseFinding(StrictModel):
     code: str
     severity: IssueSeverity
@@ -279,7 +302,7 @@ class ReviewIssue(StrictModel):
     suggestion: str
     evidence: list[str] = Field(default_factory=list, max_length=12)
 
-
+#审核报告
 class ReviewReport(StrictModel):
     decision: ReviewDecision
     score: float = Field(ge=0, le=100)
@@ -287,6 +310,16 @@ class ReviewReport(StrictModel):
     checks: dict[str, float] = Field(default_factory=dict)
 
 
+class ReadabilityContext(StrictModel):
+    project_id: str
+    chapter_number: int
+    creative_request: dict[str, Any]
+    creative_brief: dict[str, Any]
+    chapter_plan: dict[str, Any]
+    current_draft: str
+    previous_chapter_excerpt: str = ""
+
+#连续上下文
 class ContinuityContext(StrictModel):
     """Structured runtime input for the vendored Story Skills audit."""
 

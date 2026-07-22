@@ -7,6 +7,8 @@ from typing import Protocol
 
 from novel_agent.models import (
     ChapterPlan,
+    ChapterPlanBatch,
+    ChapterPlanSelection,
     CharacterMemoryBatch,
     CharacterMemoryUpdate,
     CharacterProfile,
@@ -14,6 +16,8 @@ from novel_agent.models import (
     ContinuityContext,
     CreativeBrief,
     NovelCreateRequest,
+    PlanCandidateEvaluation,
+    ReadabilityContext,
     ReviewDecision,
     ReviewReport,
 )
@@ -45,7 +49,32 @@ class LLMGateway(Protocol):
         open_threads: list[str],
         character_roster: list[CharacterRecord] | None = None,
         writing_guidance: dict[str, str] | None = None,
+        compact_characters: list[str] | None = None,
+        compact_world_facts: list[str] | None = None,
+        compact_timeline: list[str] | None = None,
+        previous_chapter_excerpt: str = "",
     ) -> ChapterPlan: ...
+
+    def plan_chapter_candidates(
+        self,
+        request: NovelCreateRequest,
+        brief: CreativeBrief,
+        chapter_number: int,
+        recent_summaries: list[str],
+        open_threads: list[str],
+        character_roster: list[CharacterRecord] | None = None,
+        writing_guidance: dict[str, str] | None = None,
+        compact_characters: list[str] | None = None,
+        compact_world_facts: list[str] | None = None,
+        compact_timeline: list[str] | None = None,
+        previous_chapter_excerpt: str = "",
+    ) -> ChapterPlanBatch: ...
+
+    def select_chapter_plan(
+        self,
+        candidates: list[ChapterPlan],
+        previous_chapter_excerpt: str = "",
+    ) -> ChapterPlanSelection: ...
 
     def write_chapter(
         self,
@@ -56,6 +85,8 @@ class LLMGateway(Protocol):
         research_notes: list[str],
         character_roster: list[CharacterRecord] | None = None,
         genre_prose_card: str = "",
+        compact_characters: list[str] | None = None,
+        previous_chapter_excerpt: str = "",
     ) -> str: ...
 
     def deslop_chapter(
@@ -81,6 +112,8 @@ class LLMGateway(Protocol):
         context: ContinuityContext,
         skill_instructions: str,
     ) -> ReviewReport: ...
+
+    def review_readability(self, context: ReadabilityContext) -> ReviewReport: ...
 
 
 class SearchAdapter(Protocol):
@@ -154,6 +187,12 @@ class DisabledRemoteGateway:
     def plan_chapter(self, *args: object, **kwargs: object) -> ChapterPlan:
         self._blocked()
 
+    def plan_chapter_candidates(self, *args: object, **kwargs: object) -> ChapterPlanBatch:
+        self._blocked()
+
+    def select_chapter_plan(self, *args: object, **kwargs: object) -> ChapterPlanSelection:
+        self._blocked()
+
     def write_chapter(self, *args: object, **kwargs: object) -> str:
         self._blocked()
 
@@ -167,6 +206,9 @@ class DisabledRemoteGateway:
         self._blocked()
 
     def review_continuity(self, *args: object, **kwargs: object) -> ReviewReport:
+        self._blocked()
+
+    def review_readability(self, *args: object, **kwargs: object) -> ReviewReport:
         self._blocked()
 
 
@@ -307,6 +349,10 @@ class OfflineLLMGateway:
         open_threads: list[str],
         character_roster: list[CharacterRecord] | None = None,
         writing_guidance: dict[str, str] | None = None,
+        compact_characters: list[str] | None = None,
+        compact_world_facts: list[str] | None = None,
+        compact_timeline: list[str] | None = None,
+        previous_chapter_excerpt: str = "",
     ) -> ChapterPlan:
         arc = (chapter_number - 1) // 10 + 1
         step = (chapter_number - 1) % 10 + 1
@@ -378,6 +424,88 @@ class OfflineLLMGateway:
             information_gap=[f"主角知道记录异常，其他人只看见{element}行动的结果"],
         )
 
+    def plan_chapter_candidates(
+        self,
+        request: NovelCreateRequest,
+        brief: CreativeBrief,
+        chapter_number: int,
+        recent_summaries: list[str],
+        open_threads: list[str],
+        character_roster: list[CharacterRecord] | None = None,
+        writing_guidance: dict[str, str] | None = None,
+        compact_characters: list[str] | None = None,
+        compact_world_facts: list[str] | None = None,
+        compact_timeline: list[str] | None = None,
+        previous_chapter_excerpt: str = "",
+    ) -> ChapterPlanBatch:
+        base = self.plan_chapter(
+            request,
+            brief,
+            chapter_number,
+            recent_summaries,
+            open_threads,
+            character_roster,
+            writing_guidance,
+            compact_characters,
+            compact_world_facts,
+            compact_timeline,
+        )
+        pressure = base.model_copy(
+            update={
+                "title": f"{base.title}·限时选择",
+                "conflict": f"{base.conflict}；原定退路在行动开始后失效，主角必须舍弃一项已有成果",
+                "turning_point": "对手先一步利用了公开信息，主角只能在救人、保住资源和隐瞒线索之间选择两项",
+                "critical_choice": "主动舍弃一项已经到手的成果，换取避免更大损失的唯一窗口",
+                "scenes": [
+                    "从上一章尚未解决的动作直接起笔，异常立即造成可见后果",
+                    "主角按原计划行动，却发现退路已被对手或环境切断",
+                    "不同人物提出互斥方案，各自都隐瞒一项现实利益",
+                    "主角作出不可兼得的选择并当场付出代价",
+                    "阶段成果保住一半，新证据证明威胁比预想更近",
+                ],
+            }
+        )
+        relationship = base.model_copy(
+            update={
+                "title": f"{base.title}·错误盟友",
+                "conflict": f"{base.conflict}；最可信的协作者拒绝执行关键步骤，理由与其既有目标直接冲突",
+                "turning_point": "一次看似背叛的行动实际挡住了更坏结果，但也暴露双方无法回避的利益分歧",
+                "critical_choice": "主角必须决定公开一部分底牌换取合作，还是独自承担更高风险",
+                "scenes": [
+                    "承接上一章结尾，由一个人物的反常行动打断既定安排",
+                    "主角追查反常原因，发现协作者掌握的信息并不完整",
+                    "双方在具体资源和责任上发生无法用口号化解的争执",
+                    "外部威胁迫使两人带着分歧合作，并留下可追踪的关系裂痕",
+                    "行动取得有限回报，但新的不信任改变下一章的人物站位",
+                ],
+            }
+        )
+        return ChapterPlanBatch(candidates=[base, pressure, relationship])
+
+    def select_chapter_plan(
+        self,
+        candidates: list[ChapterPlan],
+        previous_chapter_excerpt: str = "",
+    ) -> ChapterPlanSelection:
+        evaluations = [
+            PlanCandidateEvaluation(
+                index=index,
+                causality=88 if index == 1 else 80,
+                conflict_pressure=92 if index == 1 else 82,
+                character_choice=90 if index == 1 else 84,
+                novelty=84 if index == 1 else 78,
+                continuity=90 if previous_chapter_excerpt else 82,
+                payoff=88 if index == 1 else 83,
+                weaknesses=[] if index == 1 else ["冲突压力略低于候选二"],
+            )
+            for index, _ in enumerate(candidates)
+        ]
+        return ChapterPlanSelection(
+            selected_index=1,
+            rationale="候选二的选择不可兼得、代价可见，且最容易由上一章未完成动作自然触发。",
+            evaluations=evaluations,
+        )
+
     def write_chapter(
         self,
         request: NovelCreateRequest,
@@ -387,6 +515,8 @@ class OfflineLLMGateway:
         research_notes: list[str],
         character_roster: list[CharacterRecord] | None = None,
         genre_prose_card: str = "",
+        compact_characters: list[str] | None = None,
+        previous_chapter_excerpt: str = "",
     ) -> str:
         seed = int(hashlib.sha256(f"{brief.selected_title}:{plan.number}".encode()).hexdigest()[:8], 16)
         rng = random.Random(seed)
@@ -515,6 +645,24 @@ class OfflineLLMGateway:
             checks={"semantic": 100},
         )
 
+    def review_readability(self, context: ReadabilityContext) -> ReviewReport:
+        """Offline mode keeps the quality-review node deterministic and side-effect free."""
+        dimensions = {
+            "opening_hook": 90.0,
+            "scene_causality": 90.0,
+            "conflict_escalation": 90.0,
+            "character_agency": 90.0,
+            "dialogue_voice": 90.0,
+            "showing_specificity": 90.0,
+            "reader_payoff": 90.0,
+            "ending_hook": 90.0,
+        }
+        return ReviewReport(
+            decision=ReviewDecision.PASS,
+            score=90,
+            checks=dimensions,
+        )
+
     def revise_chapter(self, content: str, instructions: list[str], target_chars: int) -> str:
         revised = content
         for instruction in instructions:
@@ -545,6 +693,7 @@ def build_gateway(
     model: str | None = None,
     timeout_seconds: float = 120.0,
     max_retries: int = 2,
+    reasoning_budget_factor: float = 3.0,
 ) -> LLMGateway:
     if mode == "offline" or provider == "disabled":
         return OfflineLLMGateway()
@@ -557,6 +706,7 @@ def build_gateway(
             model=model or "deepseek-v4-pro",
             timeout_seconds=timeout_seconds,
             max_retries=max_retries,
+            reasoning_budget_factor=reasoning_budget_factor,
         )
     return DisabledRemoteGateway(provider=provider)
 

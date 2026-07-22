@@ -89,7 +89,7 @@ class BriefIterationTests(unittest.TestCase):
 
     def test_only_unconfirmed_drafts_can_be_deleted_or_edited(self):
         draft = self.service.create_novel(self.request())
-        self.service.delete_draft_novel(draft.id)
+        self.service.delete_novel(draft.id)
         self.assertEqual(self.repository.list_projects(), [])
 
         confirmed = self.service.create_novel(self.request())
@@ -98,9 +98,13 @@ class BriefIterationTests(unittest.TestCase):
             self.repository.get_project(confirmed.id).status, ProjectStatus.ACTIVE
         )
         with self.assertRaises(ValueError):
-            self.service.delete_draft_novel(confirmed.id)
+            self.service.delete_novel(confirmed.id)
         with self.assertRaises(ValueError):
             self.service.update_draft_brief(confirmed.id, confirmed.brief)
+        self.service.delete_novel(
+            confirmed.id, confirmation_title=confirmed.title
+        )
+        self.assertEqual(self.repository.list_projects(), [])
 
 
 if __name__ == "__main__":

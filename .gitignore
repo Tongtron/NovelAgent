@@ -17,5 +17,4 @@ dist/
 data/
 exports/
 .tmp/
-vendor/
-.venv/
+.venv*/

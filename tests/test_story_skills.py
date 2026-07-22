@@ -101,7 +101,7 @@ class StorySkillsRuntimeTests(unittest.TestCase):
 
         result = service.generate_next_chapter(project.id)
 
-        self.assertEqual(gateway.review_calls, 2)
+        self.assertEqual(gateway.review_calls, 1)
         self.assertIsNotNone(gateway.last_context)
         self.assertEqual(gateway.last_context.project_id, project.id)
         self.assertIn("Continuity Audit Checklist", gateway.last_skill_instructions)
@@ -109,7 +109,7 @@ class StorySkillsRuntimeTests(unittest.TestCase):
         self.assertIn("story_skills_semantic", result.review.checks)
         self.assertEqual(
             [event.node for event in result.events].count("StorySkillsAudit"),
-            2,
+            1,
         )
 
     def test_deterministic_foreshadow_order_blocks_chapter(self) -> None:
