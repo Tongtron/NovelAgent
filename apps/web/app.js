@@ -178,6 +178,7 @@ function renderBrief(brief, request) {
     <div class="brief-block"><h4>频道与题材</h4><p><b>${escapeHtml(request.audience_channel || "男频")}</b><br>${escapeHtml(request.genre)} · ${request.experiences.map(escapeHtml).join(" / ") || "自动确定体验"}</p></div>
     <div class="brief-block"><h4>核心卖点</h4><ul>${brief.selling_points.map((x) => `<li>${escapeHtml(x)}</li>`).join("")}</ul></div>
     <div class="brief-block"><h4>主角与主要冲突</h4><p><b>${escapeHtml(brief.protagonist)}</b><br>${escapeHtml(brief.main_conflict)}</p></div>
+    <div class="brief-block"><h4>读者契约与核心期待</h4><p>${escapeHtml(brief.reader_contract || "等待方案生成")}</p><p><b>当前期待：</b>${escapeHtml(brief.core_expectation || "等待方案生成")}</p></div>
     <div class="brief-block"><h4>世界规则</h4><ul>${brief.world_rules.map((x) => `<li>${escapeHtml(x)}</li>`).join("")}</ul></div>
     <div class="brief-block"><h4>连载计划</h4><p>${escapeHtml(brief.update_plan)}<br>预计 ${brief.total_chapters} 章 / ${brief.volume_count} 卷</p></div>
   </div>`;
