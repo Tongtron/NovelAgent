@@ -42,7 +42,31 @@ function switchView(view) {
   $$(".view").forEach((item) => item.classList.remove("active"));
   $(`#${view}View`).classList.add("active");
   $("#pageTitle").textContent = labels[view];
+  if (view !== "reader") $("#readerView")?.classList.remove("show-chapter");
   if (view === "settings") loadSettings();
+}
+
+function applySidebarCollapsed(collapsed) {
+  const shell = $("#appShell");
+  const toggle = $("#sidebarToggle");
+  if (!shell || !toggle) return;
+  shell.classList.toggle("sidebar-collapsed", collapsed);
+  toggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  toggle.setAttribute("aria-label", collapsed ? "展开侧栏" : "折叠侧栏");
+  toggle.title = collapsed ? "展开侧栏" : "折叠侧栏";
+  localStorage.setItem("novelAgentSidebarCollapsed", collapsed ? "1" : "0");
+}
+
+function setConnectionStatus(kind) {
+  const dot = $("#connectionDot");
+  if (!dot) return;
+  dot.classList.remove("is-offline", "is-error");
+  if (kind === "offline") dot.classList.add("is-offline");
+  if (kind === "error") dot.classList.add("is-error");
+}
+
+function showReaderToc() {
+  $("#readerView")?.classList.remove("show-chapter");
 }
 
 async function boot() {
@@ -52,11 +76,17 @@ async function boot() {
 }
 
 function wireNavigation() {
+  const rememberedCollapse = localStorage.getItem("novelAgentSidebarCollapsed") === "1";
+  applySidebarCollapsed(rememberedCollapse);
+  $("#sidebarToggle")?.addEventListener("click", () => {
+    applySidebarCollapsed(!$("#appShell").classList.contains("sidebar-collapsed"));
+  });
   $$(".nav-item").forEach((item) => item.addEventListener("click", () => switchView(item.dataset.view)));
   $$('[data-view-jump]').forEach((item) => item.addEventListener("click", () => switchView(item.dataset.viewJump)));
   $("#refreshButton").addEventListener("click", refresh);
   $("#rebuildCharactersButton").addEventListener("click", rebuildCharacterArchives);
   $("#characterBackButton").addEventListener("click", showCharacterList);
+  $("#readerBackButton")?.addEventListener("click", showReaderToc);
   $("#projectSelect").addEventListener("change", async (event) => {
     state.selectedId = event.target.value || null;
     localStorage.setItem("novelAgentProject", state.selectedId || "");
@@ -91,6 +121,7 @@ async function refresh() {
     $("#runtimeMode").textContent = health.mode === "offline" ? "离线安全模式" : "在线模式";
     const enabledApis = Object.entries(health.apis).filter(([, item]) => item.enabled).map(([name]) => name.toUpperCase());
     $("#apiHint").textContent = enabledApis.length ? `${enabledApis.join(" · ")} 已启用` : "外部 API 未启用";
+    setConnectionStatus(health.mode === "offline" ? "offline" : "online");
     const remembered = localStorage.getItem("novelAgentProject");
     if (!state.selectedId || !state.projects.some((p) => p.id === state.selectedId)) {
       state.selectedId = state.projects.some((p) => p.id === remembered) ? remembered : state.projects[0]?.id || null;
@@ -100,6 +131,7 @@ async function refresh() {
   } catch (error) {
     $("#runtimeMode").textContent = "服务未连接";
     $("#apiHint").textContent = "请启动本地 API";
+    setConnectionStatus("error");
     notify(error.message, true);
   }
 }
@@ -393,6 +425,7 @@ function chapterText(content, title) {
 
 async function showChapterWithHistory(chapter) {
   switchView("reader");
+  $("#readerView")?.classList.add("show-chapter");
   $$(".chapter-row").forEach((row) => row.classList.toggle("selected", row.dataset.chapterId === chapter.id));
   const isReady = chapter.status === "READY";
   const versionLabel = isReady ? "正式版本" : "草稿版本";
@@ -416,6 +449,7 @@ async function showChapterWithHistory(chapter) {
 
 function showChapterLegacy(chapter) {
   switchView("reader");
+  $("#readerView")?.classList.add("show-chapter");
   $$(".chapter-row").forEach((row) => row.classList.toggle("selected", row.dataset.chapterId === chapter.id));
   if (!chapter.content) {
     $("#readerContent").innerHTML = '<div class="empty">这个章节还没有可阅读的正文。</div>';
